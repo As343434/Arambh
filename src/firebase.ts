@@ -6,14 +6,13 @@ import { getAnalytics } from 'firebase/analytics';
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyCGmTXp_osE2PF9M55iD7wiX31O9E557D0",
-  authDomain: "arambh-a6da4.firebaseapp.com",
-  projectId: "arambh-a6da4",
-  storageBucket: "arambh-a6da4.firebasestorage.app",
-  messagingSenderId: "197577203366",
-  appId: "1:197577203366:web:cc275f68f1dcb7980d1e67",
-  measurementId: "G-NXNDNFLFHJ",
-  databaseURL: "https://arambh-a6da4-default-rtdb.firebaseio.com"
+  apiKey: "AIzaSyBKhquJnNGiGKWXrIwgDjlbmHLVekOOhHk",
+  authDomain: "arambh-c1654.firebaseapp.com",
+  projectId: "arambh-c1654",
+  storageBucket: "arambh-c1654.firebasestorage.app",
+  messagingSenderId: "1089324429935",
+  appId: "1:1089324429935:web:27fec6c1c2af676ae9939a",
+  measurementId: "G-ELM77B48MQ"
 };
 
 const app = initializeApp(firebaseConfig);
