@@ -15,8 +15,17 @@ export const Notices: React.FC = () => {
   // New Notice State
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
-  const [targetRole, setTargetRole] = useState<'all' | 'teacher' | 'student'>('all');
+  const [targetRole, setTargetRole] = useState<'all' | 'teacher' | 'student' | 'class'>('all');
+  const [targetClassId, setTargetClassId] = useState('');
+  const [classes, setClasses] = useState<any[]>([]);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    const unsubClasses = onSnapshot(collection(db, 'classes'), (snap) => {
+      setClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsubClasses();
+  }, []);
 
   useEffect(() => {
     if (!profile?.uid) return;
@@ -26,16 +35,36 @@ export const Notices: React.FC = () => {
     if (profile.role === 'student') roles.push('student');
     if (profile.role === 'admin') roles.push('teacher', 'student');
 
-    const noticesQuery = query(
-      collection(db, 'notices'),
-      where('targetRole', 'in', roles)
-    );
+    // We'll filter class-specific notices in memory to keep the query simple
+    const noticesQuery = query(collection(db, 'notices'));
 
     const unsubscribe = onSnapshot(noticesQuery, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Notice));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      
+      // Filter based on role and class
+      const filteredData = data.filter((notice: any) => {
+        if (notice.targetRole === 'all') return true;
+        if (notice.targetRole === profile.role) return true;
+        if (notice.targetRole === 'class') {
+          // If student, check if they are in the class
+          if (profile.role === 'student') {
+            const studentClass = classes.find(c => c.students?.includes(profile.uid));
+            return notice.targetClassId === studentClass?.id;
+          }
+          // If teacher, check if they are the teacher or mentor of the class
+          if (profile.role === 'teacher') {
+            const teacherClass = classes.find(c => c.id === notice.targetClassId);
+            return teacherClass?.teacherId === profile.uid || teacherClass?.mentorId === profile.uid;
+          }
+          // Admin sees all
+          if (profile.role === 'admin') return true;
+        }
+        return false;
+      });
+
       // Sort in memory
-      data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
-      setNotices(data);
+      filteredData.sort((a: any, b: any) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setNotices(filteredData);
       setLoading(false);
     }, (error) => {
       console.error('Error fetching notices:', error);
@@ -43,7 +72,7 @@ export const Notices: React.FC = () => {
     });
 
     return () => unsubscribe();
-  }, [profile]);
+  }, [profile, classes]);
 
   const handlePostNotice = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,6 +83,8 @@ export const Notices: React.FC = () => {
         title,
         content,
         targetRole,
+        targetClassId: targetRole === 'class' ? targetClassId : null,
+        targetClassName: targetRole === 'class' ? classes.find(c => c.id === targetClassId)?.name : null,
         authorId: profile.uid,
         authorName: profile.name,
         createdAt: serverTimestamp()
@@ -62,6 +93,7 @@ export const Notices: React.FC = () => {
       setTitle('');
       setContent('');
       setTargetRole('all');
+      setTargetClassId('');
     } catch (error) {
       console.error('Error posting notice:', error);
       alert('Failed to post notice');
@@ -122,9 +154,10 @@ export const Notices: React.FC = () => {
               </div>
               <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
                 notice.targetRole === 'all' ? 'bg-blue-50 text-blue-600' :
-                notice.targetRole === 'teacher' ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'
+                notice.targetRole === 'teacher' ? 'bg-amber-50 text-amber-600' : 
+                notice.targetRole === 'class' ? 'bg-indigo-50 text-indigo-600' : 'bg-emerald-50 text-emerald-600'
               }`}>
-                For: {notice.targetRole}
+                For: {notice.targetRole === 'class' ? `Class ${(notice as any).targetClassName}` : notice.targetRole}
               </span>
             </div>
             <p className="text-slate-600 leading-relaxed">{notice.content}</p>
@@ -167,8 +200,23 @@ export const Notices: React.FC = () => {
                     <option value="all">All (Teachers & Students)</option>
                     <option value="teacher">Teachers Only</option>
                     <option value="student">Students Only</option>
+                    <option value="class">Specific Class</option>
                   </select>
                 </div>
+                {targetRole === 'class' && (
+                  <div>
+                    <label className="block text-sm font-bold text-slate-700 mb-2">Select Class</label>
+                    <select 
+                      required
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      value={targetClassId}
+                      onChange={(e) => setTargetClassId(e.target.value)}
+                    >
+                      <option value="">Choose a class</option>
+                      {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                )}
                 <div>
                   <label className="block text-sm font-bold text-slate-700 mb-2">Content</label>
                   <textarea 
