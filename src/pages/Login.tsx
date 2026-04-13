@@ -103,6 +103,9 @@ export const Login: React.FC = () => {
         </form>
 
         <div className="mt-8 pt-8 border-t border-slate-100 text-center">
+          <p className="text-sm text-slate-500 mb-2">
+            Default password: <code className="bg-slate-100 px-1 rounded">arambh123</code>
+          </p>
           <p className="text-sm text-slate-500">
             Forgot password? Contact your school administrator.
           </p>
