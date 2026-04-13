@@ -108,6 +108,7 @@ export const AcademicManagement: React.FC = () => {
       await addDoc(collection(db, 'timetable'), {
         classId: ttClassId,
         className: selectedClass?.name || '',
+        mentorId: selectedClass?.mentorId || '',
         day: ttDay,
         startTime: ttStartTime,
         endTime: ttEndTime,
@@ -169,6 +170,7 @@ export const AcademicManagement: React.FC = () => {
             await addDoc(collection(db, 'timetable'), {
               classId: cls.id,
               className: cls.name,
+              mentorId: cls.mentorId || '',
               day: day || 'Monday',
               startTime,
               endTime,
