@@ -18,6 +18,7 @@ export const Classes: React.FC = () => {
   const [className, setClassName] = useState('');
   const [subjectId, setSubjectId] = useState('');
   const [teacherId, setTeacherId] = useState('');
+  const [mentorId, setMentorId] = useState('');
   const [subjects, setSubjects] = useState<any[]>([]);
   const [selectedStudents, setSelectedStudents] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -66,6 +67,7 @@ export const Classes: React.FC = () => {
         name: className,
         subjectId,
         teacherId,
+        mentorId,
         students: selectedStudents,
         createdAt: serverTimestamp()
       });
@@ -73,6 +75,7 @@ export const Classes: React.FC = () => {
       setClassName('');
       setSubjectId('');
       setTeacherId('');
+      setMentorId('');
       setSelectedStudents([]);
     } catch (error) {
       console.error('Error creating class:', error);
@@ -127,8 +130,11 @@ export const Classes: React.FC = () => {
               </div>
               
               <h3 className="text-xl font-bold text-slate-900 mb-1">{cls.name}</h3>
-              <p className="text-sm font-medium text-slate-500 mb-6">
+              <p className="text-sm font-medium text-slate-500 mb-2">
                 {subjects.find(s => s.id === (cls as any).subjectId)?.name || (cls as any).subject || 'No Subject'}
+              </p>
+              <p className="text-xs font-bold text-indigo-600 mb-6">
+                Mentor: {teachers.find(t => t.uid === (cls as any).mentorId)?.name || 'Not Assigned'}
               </p>
               
               <div className="flex items-center justify-between pt-6 border-t border-slate-50">
@@ -186,7 +192,20 @@ export const Classes: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Assign Teacher</label>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">Class Mentor (Primary Teacher)</label>
+                  <select 
+                    required
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    value={mentorId}
+                    onChange={(e) => setMentorId(e.target.value)}
+                  >
+                    <option value="">Choose a mentor</option>
+                    {teachers.map(t => <option key={t.uid} value={t.uid}>{t.name} ({t.employeeId})</option>)}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">Default Subject Teacher</label>
                   <select 
                     required
                     className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
