@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, setDoc, updateDoc, arrayUnion, onSnapshot, deleteDoc } from 'firebase/firestore';
-import { createUserWithEmailAndPassword, initializeAuth, browserLocalPersistence } from 'firebase/auth';
+import { createUserWithEmailAndPassword, initializeAuth, browserLocalPersistence, getAuth, inMemoryPersistence } from 'firebase/auth';
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import { db, auth } from '../../firebase';
 import { Users, BookOpen, Bell, Calendar, UserPlus, GraduationCap, CheckCircle2, AlertCircle, Upload, FileSpreadsheet, Loader2, Plus, Trash2 } from 'lucide-react';
@@ -10,23 +10,22 @@ import Papa from 'papaparse';
 // Helper to create users without signing out the admin
 // In a real app, use Cloud Functions. For this prototype, we use a secondary app instance.
 const getSecondaryAuth = () => {
-  const secondaryAppName = 'secondary';
+  const secondaryAppName = 'secondary-auth-app';
   let secondaryApp;
-  if (getApps().some(app => app.name === secondaryAppName)) {
+  try {
     secondaryApp = getApp(secondaryAppName);
-  } else {
-    // Re-use the same config
-    const config = {
-      apiKey: "AIzaSyCGmTXp_osE2PF9M55iD7wiX31O9E557D0",
-      authDomain: "arambh-a6da4.firebaseapp.com",
-      projectId: "arambh-a6da4",
-      storageBucket: "arambh-a6da4.firebasestorage.app",
-      messagingSenderId: "197577203366",
-      appId: "1:197577203366:web:cc275f68f1dcb7980d1e67",
-    };
-    secondaryApp = initializeApp(config, secondaryAppName);
+  } catch (e) {
+    const mainApp = getApp();
+    secondaryApp = initializeApp(mainApp.options, secondaryAppName);
   }
-  return initializeAuth(secondaryApp, { persistence: browserLocalPersistence });
+  
+  // Use inMemoryPersistence to ensure the secondary auth session 
+  // doesn't persist or interfere with the main app session
+  try {
+    return initializeAuth(secondaryApp, { persistence: inMemoryPersistence });
+  } catch (e) {
+    return getAuth(secondaryApp);
+  }
 };
 
 export const AdminDashboard: React.FC = () => {
@@ -107,6 +106,8 @@ export const AdminDashboard: React.FC = () => {
       const secondaryAuth = getSecondaryAuth();
       const userCredential = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, password);
       const user = userCredential.user;
+      
+      console.log('User created in Auth with UID:', user.uid);
 
       await setDoc(doc(db, 'users', user.uid), {
         uid: user.uid,
@@ -129,7 +130,10 @@ export const AdminDashboard: React.FC = () => {
       await secondaryAuth.signOut();
 
       const typeLabel = regType ? regType.charAt(0).toUpperCase() + regType.slice(1) : 'User';
-      setRegMessage({ type: 'success', text: `${typeLabel} registered successfully!` });
+      setRegMessage({ 
+        type: 'success', 
+        text: `${typeLabel} registered successfully! Login Email: ${finalEmail}` 
+      });
       setName('');
       setIdValue('');
       setEmail('');
