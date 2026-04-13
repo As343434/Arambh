@@ -1,26 +1,73 @@
-import React, { useState, useEffect } from 'react';
-import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, setDoc } from 'firebase/firestore';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
+import React, { useState, useEffect, useRef } from 'react';
+import { collection, query, where, getDocs, addDoc, serverTimestamp, doc, setDoc, updateDoc, arrayUnion, onSnapshot, deleteDoc } from 'firebase/firestore';
+import { createUserWithEmailAndPassword, initializeAuth, browserLocalPersistence } from 'firebase/auth';
+import { initializeApp, getApp, getApps } from 'firebase/app';
 import { db, auth } from '../../firebase';
-import { Users, BookOpen, Bell, Calendar, UserPlus, GraduationCap, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Users, BookOpen, Bell, Calendar, UserPlus, GraduationCap, CheckCircle2, AlertCircle, Upload, FileSpreadsheet, Loader2, Plus, Trash2 } from 'lucide-react';
 import { motion } from 'motion/react';
+import Papa from 'papaparse';
+
+// Helper to create users without signing out the admin
+// In a real app, use Cloud Functions. For this prototype, we use a secondary app instance.
+const getSecondaryAuth = () => {
+  const secondaryAppName = 'secondary';
+  let secondaryApp;
+  if (getApps().some(app => app.name === secondaryAppName)) {
+    secondaryApp = getApp(secondaryAppName);
+  } else {
+    // Re-use the same config
+    const config = {
+      apiKey: "AIzaSyCGmTXp_osE2PF9M55iD7wiX31O9E557D0",
+      authDomain: "arambh-a6da4.firebaseapp.com",
+      projectId: "arambh-a6da4",
+      storageBucket: "arambh-a6da4.firebasestorage.app",
+      messagingSenderId: "197577203366",
+      appId: "1:197577203366:web:cc275f68f1dcb7980d1e67",
+    };
+    secondaryApp = initializeApp(config, secondaryAppName);
+  }
+  return initializeAuth(secondaryApp, { persistence: browserLocalPersistence });
+};
 
 export const AdminDashboard: React.FC = () => {
   const [stats, setStats] = useState({ teachers: 0, students: 0, classes: 0 });
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'register'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'register' | 'bulk' | 'subjects'>('overview');
+  const [subjects, setSubjects] = useState<any[]>([]);
+  const [classes, setClasses] = useState<any[]>([]);
+  const [subjectName, setSubjectName] = useState('');
+  const [subjectCode, setSubjectCode] = useState('');
+  const [editingSubject, setEditingSubject] = useState<any | null>(null);
   
   // Registration Form State
   const [regType, setRegType] = useState<'teacher' | 'student'>('student');
   const [name, setName] = useState('');
   const [idValue, setIdValue] = useState(''); // Roll No or Employee ID
+  const [selectedClassId, setSelectedClassId] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('arambh123'); // Default password
   const [regLoading, setRegLoading] = useState(false);
   const [regMessage, setRegMessage] = useState({ type: '', text: '' });
 
+  // Bulk Upload State
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 });
+  const [bulkResults, setBulkResults] = useState<{ success: number, error: number, details: string[] }>({ success: 0, error: 0, details: [] });
+
   useEffect(() => {
     fetchStats();
+    const unsubSubjects = onSnapshot(collection(db, 'subjects'), (snap) => {
+      setSubjects(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    const unsubClasses = onSnapshot(collection(db, 'classes'), (snap) => {
+      setClasses(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    return () => {
+      unsubSubjects();
+      unsubClasses();
+    };
   }, []);
 
   const fetchStats = async () => {
@@ -54,17 +101,13 @@ export const AdminDashboard: React.FC = () => {
     setRegMessage({ type: '', text: '' });
 
     try {
-      // For students, use roll number as email if not provided
       const finalEmail = email || (regType === 'student' ? `roll${idValue}@arambh.com` : `emp${idValue}@arambh.com`);
       
-      // 1. Create user in Firebase Auth
-      // Note: This will sign out the admin if not careful in a real app, 
-      // but for this demo/prototype we'll assume it's handled or use a secondary auth instance if needed.
-      // In a production app, you'd use a Cloud Function to create users to avoid signing out the admin.
-      const userCredential = await createUserWithEmailAndPassword(auth, finalEmail, password);
+      // Use secondary auth to avoid signing out the admin
+      const secondaryAuth = getSecondaryAuth();
+      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, password);
       const user = userCredential.user;
 
-      // 2. Create user profile in Firestore
       await setDoc(doc(db, 'users', user.uid), {
         uid: user.uid,
         name,
@@ -75,16 +118,133 @@ export const AdminDashboard: React.FC = () => {
         createdAt: serverTimestamp()
       });
 
+      // Assign to class if student and class selected
+      if (regType === 'student' && selectedClassId) {
+        await updateDoc(doc(db, 'classes', selectedClassId), {
+          students: arrayUnion(user.uid)
+        });
+      }
+
+      // Sign out from secondary auth immediately
+      await secondaryAuth.signOut();
+
       const typeLabel = regType ? regType.charAt(0).toUpperCase() + regType.slice(1) : 'User';
       setRegMessage({ type: 'success', text: `${typeLabel} registered successfully!` });
       setName('');
       setIdValue('');
       setEmail('');
+      setSelectedClassId('');
       fetchStats();
     } catch (error: any) {
       setRegMessage({ type: 'error', text: error.message || 'Failed to register user.' });
     } finally {
       setRegLoading(false);
+    }
+  };
+
+  const handleBulkUpload = async () => {
+    if (!bulkFile) return;
+    setBulkLoading(true);
+    setBulkResults({ success: 0, error: 0, details: [] });
+    
+    Papa.parse(bulkFile, {
+      header: true,
+      skipEmptyLines: true,
+      complete: async (results) => {
+        const data = results.data as any[];
+        setBulkProgress({ current: 0, total: data.length });
+        
+        const secondaryAuth = getSecondaryAuth();
+        let successCount = 0;
+        let errorCount = 0;
+        const details: string[] = [];
+
+        for (let i = 0; i < data.length; i++) {
+          const row = data[i];
+          setBulkProgress(prev => ({ ...prev, current: i + 1 }));
+          
+          try {
+            const { name, id, email, role, className } = row;
+            if (!name || !id || !role) throw new Error(`Missing required fields for row ${i + 1}`);
+            
+            const finalEmail = email || (role === 'student' ? `roll${id}@arambh.com` : `emp${id}@arambh.com`);
+            const finalPassword = 'arambh123';
+
+            // 1. Create User
+            const userCredential = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, finalPassword);
+            const user = userCredential.user;
+
+            // 2. Create Profile
+            await setDoc(doc(db, 'users', user.uid), {
+              uid: user.uid,
+              name,
+              email: finalEmail,
+              role,
+              [role === 'student' ? 'rollNo' : 'employeeId']: id,
+              isFirstLogin: true,
+              createdAt: serverTimestamp()
+            });
+
+            // 3. Assign to Class if mentioned
+            if (className && role === 'student') {
+              const classesRef = collection(db, 'classes');
+              const q = query(classesRef, where('name', '==', className));
+              const querySnapshot = await getDocs(q);
+              
+              if (!querySnapshot.empty) {
+                const classDoc = querySnapshot.docs[0];
+                await updateDoc(doc(db, 'classes', classDoc.id), {
+                  students: arrayUnion(user.uid)
+                });
+                details.push(`Added ${name} to class ${className}`);
+              } else {
+                details.push(`Class ${className} not found for ${name}`);
+              }
+            }
+
+            successCount++;
+          } catch (err: any) {
+            errorCount++;
+            details.push(`Error row ${i + 1}: ${err.message}`);
+          }
+        }
+
+        await secondaryAuth.signOut();
+        setBulkResults({ success: successCount, error: errorCount, details });
+        setBulkLoading(false);
+        setBulkFile(null);
+        fetchStats();
+      }
+    });
+  };
+
+  const handleAddSubject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      if (editingSubject) {
+        await updateDoc(doc(db, 'subjects', editingSubject.id), {
+          name: subjectName,
+          code: subjectCode,
+          updatedAt: serverTimestamp()
+        });
+        setEditingSubject(null);
+      } else {
+        await addDoc(collection(db, 'subjects'), {
+          name: subjectName,
+          code: subjectCode,
+          createdAt: serverTimestamp()
+        });
+      }
+      setSubjectName('');
+      setSubjectCode('');
+    } catch (err) {
+      alert('Error saving subject');
+    }
+  };
+
+  const handleDeleteSubject = async (id: string) => {
+    if (window.confirm('Are you sure you want to delete this subject?')) {
+      await deleteDoc(doc(db, 'subjects', id));
     }
   };
 
@@ -113,6 +273,18 @@ export const AdminDashboard: React.FC = () => {
             className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'register' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' : 'text-slate-600 hover:bg-slate-50'}`}
           >
             Registration
+          </button>
+          <button 
+            onClick={() => setActiveTab('bulk')}
+            className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'bulk' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            Bulk Upload
+          </button>
+          <button 
+            onClick={() => setActiveTab('subjects')}
+            className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'subjects' ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            Subjects
           </button>
         </div>
       </div>
@@ -154,17 +326,196 @@ export const AdminDashboard: React.FC = () => {
                 <GraduationCap className="w-6 h-6" />
                 Add Teacher
               </button>
-              <button className="p-6 bg-blue-50 text-blue-700 rounded-2xl font-bold hover:bg-blue-100 transition-all flex flex-col items-center gap-2">
-                <BookOpen className="w-6 h-6" />
-                Assign Subject
+              <button onClick={() => { setActiveTab('bulk'); }} className="p-6 bg-blue-50 text-blue-700 rounded-2xl font-bold hover:bg-blue-100 transition-all flex flex-col items-center gap-2">
+                <Upload className="w-6 h-6" />
+                Bulk Upload
               </button>
-              <button className="p-6 bg-amber-50 text-amber-700 rounded-2xl font-bold hover:bg-amber-100 transition-all flex flex-col items-center gap-2">
-                <Bell className="w-6 h-6" />
-                Post Notice
+              <button onClick={() => { setActiveTab('subjects'); }} className="p-6 bg-violet-50 text-violet-700 rounded-2xl font-bold hover:bg-violet-100 transition-all flex flex-col items-center gap-2">
+                <BookOpen className="w-6 h-6" />
+                Manage Subjects
+              </button>
+              <button onClick={() => { window.location.href = '/classes'; }} className="p-6 bg-amber-50 text-amber-700 rounded-2xl font-bold hover:bg-amber-100 transition-all flex flex-col items-center gap-2">
+                <BookOpen className="w-6 h-6" />
+                Manage Classes
               </button>
             </div>
           </div>
         </>
+      ) : activeTab === 'bulk' ? (
+        <motion.div 
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm max-w-2xl mx-auto"
+        >
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <FileSpreadsheet className="w-8 h-8" />
+            </div>
+            <h3 className="text-xl font-bold text-slate-900">Bulk User Upload</h3>
+            <p className="text-slate-500 text-sm mt-2">Upload a CSV file to register multiple students or teachers at once.</p>
+          </div>
+
+          <div className="p-6 border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50 text-center">
+            <input 
+              type="file" 
+              accept=".csv" 
+              className="hidden" 
+              ref={fileInputRef}
+              onChange={(e) => setBulkFile(e.target.files?.[0] || null)}
+            />
+            {!bulkFile ? (
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="flex flex-col items-center gap-2 mx-auto"
+              >
+                <Upload className="w-8 h-8 text-slate-400" />
+                <span className="text-sm font-bold text-slate-600">Click to select CSV file</span>
+                <span className="text-xs text-slate-400 italic">Expected columns: name, id, email, role, className</span>
+              </button>
+            ) : (
+              <div className="flex items-center justify-between bg-white p-4 rounded-2xl border border-slate-200">
+                <div className="flex items-center gap-3">
+                  <FileSpreadsheet className="w-6 h-6 text-emerald-500" />
+                  <span className="text-sm font-medium text-slate-700">{bulkFile.name}</span>
+                </div>
+                <button onClick={() => setBulkFile(null)} className="text-slate-400 hover:text-red-500">
+                  <AlertCircle className="w-5 h-5" />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {bulkLoading && (
+            <div className="mt-8 space-y-4">
+              <div className="flex justify-between text-sm font-bold text-slate-600">
+                <span>Processing Users...</span>
+                <span>{bulkProgress.current} / {bulkProgress.total}</span>
+              </div>
+              <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-indigo-600 transition-all duration-300"
+                  style={{ width: `${(bulkProgress.current / bulkProgress.total) * 100}%` }}
+                />
+              </div>
+              <p className="text-center text-xs text-slate-400 animate-pulse flex items-center justify-center gap-2">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                Creating accounts and assigning classes...
+              </p>
+            </div>
+          )}
+
+          {bulkResults.details.length > 0 && !bulkLoading && (
+            <div className="mt-8 p-6 bg-slate-50 rounded-3xl border border-slate-200">
+              <h4 className="font-bold text-slate-900 mb-4">Upload Results</h4>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="bg-emerald-50 p-4 rounded-2xl text-center border border-emerald-100">
+                  <p className="text-2xl font-bold text-emerald-700">{bulkResults.success}</p>
+                  <p className="text-xs font-medium text-emerald-600">Successful</p>
+                </div>
+                <div className="bg-red-50 p-4 rounded-2xl text-center border border-red-100">
+                  <p className="text-2xl font-bold text-red-700">{bulkResults.error}</p>
+                  <p className="text-xs font-medium text-red-600">Errors</p>
+                </div>
+              </div>
+              <div className="max-h-40 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
+                {bulkResults.details.map((detail, idx) => (
+                  <p key={idx} className={`text-xs ${detail.startsWith('Error') ? 'text-red-500' : 'text-slate-500'}`}>
+                    • {detail}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button 
+            onClick={handleBulkUpload}
+            disabled={!bulkFile || bulkLoading}
+            className="w-full mt-8 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-2xl shadow-lg shadow-indigo-200 transition-all disabled:opacity-50"
+          >
+            {bulkLoading ? 'Processing...' : 'Start Bulk Registration'}
+          </button>
+        </motion.div>
+      ) : activeTab === 'subjects' ? (
+        <motion.div 
+          initial={{ opacity: 0, x: 20 }}
+          animate={{ opacity: 1, x: 0 }}
+          className="grid grid-cols-1 lg:grid-cols-3 gap-8"
+        >
+          <div className="lg:col-span-1">
+            <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
+              <h3 className="text-lg font-bold text-slate-900 mb-6 flex items-center gap-2">
+                {editingSubject ? <BookOpen className="w-5 h-5 text-indigo-600" /> : <Plus className="w-5 h-5 text-indigo-600" />}
+                {editingSubject ? 'Edit Subject' : 'Add New Subject'}
+              </h3>
+              <form onSubmit={handleAddSubject} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">Subject Name</label>
+                  <input 
+                    type="text" required value={subjectName} onChange={(e) => setSubjectName(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    placeholder="e.g. Physics"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-slate-700 mb-2">Subject Code</label>
+                  <input 
+                    type="text" required value={subjectCode} onChange={(e) => setSubjectCode(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    placeholder="e.g. PHY-101"
+                  />
+                </div>
+                <div className="flex gap-3">
+                  {editingSubject && (
+                    <button 
+                      type="button" 
+                      onClick={() => { setEditingSubject(null); setSubjectName(''); setSubjectCode(''); }}
+                      className="flex-1 bg-slate-100 text-slate-600 font-bold py-4 rounded-2xl hover:bg-slate-200 transition-all"
+                    >
+                      Cancel
+                    </button>
+                  )}
+                  <button type="submit" className="flex-[2] bg-indigo-600 text-white font-bold py-4 rounded-2xl hover:bg-indigo-700 transition-all">
+                    {editingSubject ? 'Update Subject' : 'Add Subject'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div className="lg:col-span-2">
+            <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
+              <h3 className="text-lg font-bold text-slate-900 mb-6 flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-indigo-600" />
+                Subject List
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {subjects.map(sub => (
+                  <div key={sub.id} className="p-6 bg-slate-50 rounded-2xl border border-slate-100 flex items-center justify-between group">
+                    <div>
+                      <p className="font-bold text-slate-900">{sub.name}</p>
+                      <p className="text-xs text-slate-500 uppercase tracking-wider">{sub.code}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={() => { setEditingSubject(sub); setSubjectName(sub.name); setSubjectCode(sub.code); }} 
+                        className="p-2 text-slate-400 hover:text-indigo-600 transition-colors"
+                      >
+                        <Plus className="w-5 h-5 rotate-45" />
+                      </button>
+                      <button 
+                        onClick={() => handleDeleteSubject(sub.id)} 
+                        className="p-2 text-slate-400 hover:text-red-500 transition-colors"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {subjects.length === 0 && <p className="col-span-full text-center py-8 text-slate-400 italic">No subjects added yet.</p>}
+              </div>
+            </div>
+          </div>
+        </motion.div>
       ) : (
         <motion.div 
           initial={{ opacity: 0, x: 20 }}
@@ -230,6 +581,20 @@ export const AdminDashboard: React.FC = () => {
               />
               <p className="text-[10px] text-slate-400 mt-1 italic">If left blank, a default email will be generated using the ID.</p>
             </div>
+
+            {regType === 'student' && (
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">Assign Class (Optional)</label>
+                <select 
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  value={selectedClassId}
+                  onChange={(e) => setSelectedClassId(e.target.value)}
+                >
+                  <option value="">No Class Assigned</option>
+                  {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            )}
 
             <div className="p-4 bg-amber-50 rounded-2xl border border-amber-100">
               <p className="text-xs text-amber-700 font-medium">

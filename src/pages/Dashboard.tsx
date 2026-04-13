@@ -6,6 +6,7 @@ import { StudentDashboard } from './student/Dashboard';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 import { ShieldCheck, AlertCircle, Loader2 } from 'lucide-react';
+import { Navigate } from 'react-router-dom';
 
 export const Dashboard: React.FC = () => {
   const { profile, user } = useAuth();
@@ -35,7 +36,7 @@ export const Dashboard: React.FC = () => {
 
   if (profile?.role === 'admin') return <AdminDashboard />;
   if (profile?.role === 'teacher') return <TeacherDashboard />;
-  if (profile?.role === 'student') return <StudentDashboard />;
+  if (profile?.role === 'student') return <Navigate to="/student-dashboard" replace />;
 
   return (
     <div className="flex items-center justify-center min-h-[60vh] p-4">

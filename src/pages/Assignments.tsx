@@ -42,17 +42,26 @@ export const Assignments: React.FC = () => {
 
     const unsubscribeClasses = onSnapshot(classesQuery, (snapshot) => {
       setClasses(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Class)));
+    }, (error) => {
+      console.error('Error fetching classes:', error);
     });
 
-    const assignmentsQuery = query(collection(db, 'assignments'), orderBy('createdAt', 'desc'));
+    const assignmentsQuery = query(collection(db, 'assignments'));
     const unsubscribeAssignments = onSnapshot(assignmentsQuery, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Assignment));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      // Sort in memory
+      data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      
       if (isTeacher) {
         setAssignments(data.filter(a => a.teacherId === profile.uid));
+      } else if (isStudent) {
+        setAssignments(data);
       } else {
-        // In a real app, we'd filter by student's classes
         setAssignments(data);
       }
+      setLoading(false);
+    }, (error) => {
+      console.error('Error fetching assignments:', error);
       setLoading(false);
     });
 
@@ -135,6 +144,10 @@ export const Assignments: React.FC = () => {
     setShowSubmissionsModal(true);
   };
 
+  const filteredAssignments = isStudent 
+    ? assignments.filter(a => classes.some(c => c.id === a.classId))
+    : assignments;
+
   if (loading) return <div className="animate-pulse space-y-4">
     {[1, 2, 3].map(i => <div key={i} className="h-40 bg-slate-200 rounded-3xl" />)}
   </div>;
@@ -158,7 +171,7 @@ export const Assignments: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 gap-6">
-        {assignments.length > 0 ? assignments.map((assign, index) => {
+        {filteredAssignments.length > 0 ? filteredAssignments.map((assign, index) => {
           const studentSubmission = submissions.find(s => s.assignmentId === assign.id);
           return (
             <motion.div

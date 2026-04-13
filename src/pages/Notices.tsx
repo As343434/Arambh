@@ -28,12 +28,17 @@ export const Notices: React.FC = () => {
 
     const noticesQuery = query(
       collection(db, 'notices'),
-      where('targetRole', 'in', roles),
-      orderBy('createdAt', 'desc')
+      where('targetRole', 'in', roles)
     );
 
     const unsubscribe = onSnapshot(noticesQuery, (snapshot) => {
-      setNotices(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Notice)));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Notice));
+      // Sort in memory
+      data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setNotices(data);
+      setLoading(false);
+    }, (error) => {
+      console.error('Error fetching notices:', error);
       setLoading(false);
     });
 

@@ -15,9 +15,12 @@ import { Profile } from './pages/Profile';
 import { ChangePassword } from './pages/ChangePassword';
 import { Classes } from './pages/Classes';
 import { Attendance } from './pages/Attendance';
+import { Timetable } from './pages/Timetable';
 import { Notices } from './pages/Notices';
 import { Assignments } from './pages/Assignments';
 import { UserManagement } from './pages/admin/Users';
+import { StudentDashboard } from './pages/student/Dashboard';
+import { AcademicManagement } from './pages/admin/Academic';
 
 export default function App() {
   return (
@@ -40,11 +43,27 @@ export default function App() {
             </ProtectedRoute>
           } />
 
+          <Route path="/student-dashboard" element={
+            <ProtectedRoute allowedRoles={['student']}>
+              <Layout>
+                <StudentDashboard />
+              </Layout>
+            </ProtectedRoute>
+          } />
+
           {/* Admin Routes */}
           <Route path="/admin/users" element={
             <ProtectedRoute allowedRoles={['admin']}>
               <Layout>
                 <UserManagement />
+              </Layout>
+            </ProtectedRoute>
+          } />
+
+          <Route path="/admin/academic" element={
+            <ProtectedRoute allowedRoles={['admin']}>
+              <Layout>
+                <AcademicManagement />
               </Layout>
             </ProtectedRoute>
           } />
@@ -62,6 +81,14 @@ export default function App() {
             <ProtectedRoute allowedRoles={['teacher', 'student']}>
               <Layout>
                 <Attendance />
+              </Layout>
+            </ProtectedRoute>
+          } />
+
+          <Route path="/timetable" element={
+            <ProtectedRoute allowedRoles={['teacher', 'student']}>
+              <Layout>
+                <Timetable />
               </Layout>
             </ProtectedRoute>
           } />

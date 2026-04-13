@@ -12,7 +12,8 @@ import {
   LogOut, 
   User as UserIcon,
   Menu,
-  X
+  X,
+  Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -30,7 +31,7 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
   const menuItems = [
     { 
       name: 'Dashboard', 
-      path: '/dashboard', 
+      path: isStudent ? '/student-dashboard' : '/dashboard', 
       icon: LayoutDashboard, 
       show: true 
     },
@@ -41,10 +42,22 @@ export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) =>
       show: isAdmin 
     },
     { 
+      name: 'Academic', 
+      path: '/admin/academic', 
+      icon: Calendar, 
+      show: isAdmin 
+    },
+    { 
       name: 'Classes', 
       path: '/classes', 
       icon: BookOpen, 
       show: true 
+    },
+    { 
+      name: 'Timetable', 
+      path: '/timetable', 
+      icon: Calendar, 
+      show: isTeacher || isStudent 
     },
     { 
       name: 'Attendance', 

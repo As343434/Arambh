@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function hasRole(role) {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == role;
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (request.auth.uid == userId || hasRole('admin'));
+    }
+
+    // Classes collection
+    match /classes/{classId} {
+      allow read: if isSignedIn();
+      allow write: if hasRole('admin');
+    }
+
+    // Subjects collection
+    match /subjects/{subjectId} {
+      allow read: if isSignedIn();
+      allow write: if hasRole('admin');
+    }
+
+    // Attendance collection
+    match /attendance/{attendanceId} {
+      allow read: if isSignedIn();
+      allow write: if hasRole('admin') || hasRole('teacher');
+    }
+
+    // Timetable collection
+    match /timetable/{timetableId} {
+      allow read: if isSignedIn();
+      allow write: if hasRole('admin');
+    }
+
+    // Notices collection
+    match /notices/{noticeId} {
+      allow read: if isSignedIn();
+      allow write: if hasRole('admin') || hasRole('teacher');
+    }
+
+    // Assignments collection
+    match /assignments/{assignmentId} {
+      allow read: if isSignedIn();
+      allow write: if hasRole('admin') || hasRole('teacher');
+    }
+
+    // Submissions collection
+    match /submissions/{submissionId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+  }
+}

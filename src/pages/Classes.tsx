@@ -16,8 +16,9 @@ export const Classes: React.FC = () => {
   // Admin: Create Class Modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [className, setClassName] = useState('');
-  const [subject, setSubject] = useState('');
+  const [subjectId, setSubjectId] = useState('');
   const [teacherId, setTeacherId] = useState('');
+  const [subjects, setSubjects] = useState<any[]>([]);
   const [selectedStudents, setSelectedStudents] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -38,12 +39,18 @@ export const Classes: React.FC = () => {
       setLoading(false);
     });
 
+    const fetchSubjects = async () => {
+      const subjectsSnap = await getDocs(collection(db, 'subjects'));
+      setSubjects(subjectsSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+    };
+    fetchSubjects();
+
     if (isAdmin) {
       const fetchUsers = async () => {
         const teachersSnap = await getDocs(query(collection(db, 'users'), where('role', '==', 'teacher')));
         const studentsSnap = await getDocs(query(collection(db, 'users'), where('role', '==', 'student')));
-        setTeachers(teachersSnap.docs.map(d => d.data()));
-        setStudents(studentsSnap.docs.map(d => d.data()));
+        setTeachers(teachersSnap.docs.map(d => ({ uid: d.id, ...d.data() })));
+        setStudents(studentsSnap.docs.map(d => ({ uid: d.id, ...d.data() })));
       };
       fetchUsers();
     }
@@ -57,14 +64,14 @@ export const Classes: React.FC = () => {
     try {
       await addDoc(collection(db, 'classes'), {
         name: className,
-        subject,
+        subjectId,
         teacherId,
         students: selectedStudents,
         createdAt: serverTimestamp()
       });
       setShowCreateModal(false);
       setClassName('');
-      setSubject('');
+      setSubjectId('');
       setTeacherId('');
       setSelectedStudents([]);
     } catch (error) {
@@ -120,7 +127,9 @@ export const Classes: React.FC = () => {
               </div>
               
               <h3 className="text-xl font-bold text-slate-900 mb-1">{cls.name}</h3>
-              <p className="text-sm font-medium text-slate-500 mb-6">{cls.subject}</p>
+              <p className="text-sm font-medium text-slate-500 mb-6">
+                {subjects.find(s => s.id === (cls as any).subjectId)?.name || (cls as any).subject || 'No Subject'}
+              </p>
               
               <div className="flex items-center justify-between pt-6 border-t border-slate-50">
                 <div className="flex items-center gap-2 text-xs font-bold text-slate-400">
@@ -166,11 +175,13 @@ export const Classes: React.FC = () => {
                   </div>
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-2">Subject</label>
-                    <input 
-                      type="text" required value={subject} onChange={(e) => setSubject(e.target.value)}
+                    <select 
+                      required value={subjectId} onChange={(e) => setSubjectId(e.target.value)}
                       className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                      placeholder="e.g. Mathematics"
-                    />
+                    >
+                      <option value="">Select Subject</option>
+                      {subjects.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
                   </div>
                 </div>
 

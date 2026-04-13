@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, getDocs, writeBatch } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, getDocs, writeBatch, documentId } from 'firebase/firestore';
 import { db } from '../firebase';
 import { useAuth } from '../contexts/AuthContext';
 import { Class, Attendance as AttendanceType } from '../types';
@@ -16,6 +16,9 @@ export const Attendance: React.FC = () => {
   // Teacher View State
   const [selectedClass, setSelectedClass] = useState<Class | null>(null);
   const [records, setRecords] = useState<{[key: string]: 'present' | 'absent'}>({});
+  const [timetable, setTimetable] = useState<any[]>([]);
+  const [subjects, setSubjects] = useState<any[]>([]);
+  const [selectedSlot, setSelectedSlot] = useState<any | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
 
@@ -37,8 +40,8 @@ export const Attendance: React.FC = () => {
         // Fetch students for teacher's classes
         const allStudentIds = Array.from(new Set(classesData.flatMap(c => c.students || []))).filter(id => !!id);
         if (allStudentIds.length > 0) {
-          const studentsSnap = await getDocs(query(collection(db, 'users'), where('uid', 'in', allStudentIds)));
-          setStudents(studentsSnap.docs.map(d => d.data()));
+          const studentsSnap = await getDocs(query(collection(db, 'users'), where(documentId(), 'in', allStudentIds)));
+          setStudents(studentsSnap.docs.map(d => ({ uid: d.id, ...d.data() })));
         }
       }
     });
@@ -47,18 +50,42 @@ export const Attendance: React.FC = () => {
     if (isStudent) {
       attendanceQuery = query(
         collection(db, 'attendance'), 
-        where('studentId', '==', profile.uid),
-        orderBy('date', 'desc')
+        where('studentId', '==', profile.uid)
       );
     } else {
-      attendanceQuery = query(collection(db, 'attendance'), orderBy('date', 'desc'));
+      attendanceQuery = query(collection(db, 'attendance'));
     }
 
     const unsubscribeAttendance = onSnapshot(attendanceQuery, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      // Sort in memory
+      data.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
       setAttendance(data);
       setLoading(false);
+    }, (error) => {
+      console.error('Error fetching attendance:', error);
+      setLoading(false);
     });
+
+    const fetchSubjects = async () => {
+      const snap = await getDocs(collection(db, 'subjects'));
+      setSubjects(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    };
+    fetchSubjects();
+
+    if (isTeacher) {
+      const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+      const todayDay = days[new Date().getDay()];
+      const ttQuery = query(collection(db, 'timetable'), where('teacherId', '==', profile.uid), where('day', '==', todayDay));
+      const unsubscribeTimetable = onSnapshot(ttQuery, (snap) => {
+        setTimetable(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      });
+      return () => {
+        unsubscribeClasses();
+        unsubscribeAttendance();
+        unsubscribeTimetable();
+      };
+    }
 
     return () => {
       unsubscribeClasses();
@@ -67,7 +94,7 @@ export const Attendance: React.FC = () => {
   }, [profile]);
 
   const handleMarkAttendance = async () => {
-    if (!selectedClass || !profile) return;
+    if (!selectedClass || !profile || !selectedSlot) return;
     setSubmitting(true);
     try {
       const today = new Date().toISOString().split('T')[0];
@@ -78,6 +105,8 @@ export const Attendance: React.FC = () => {
         batch.set(attendanceRef, {
           classId: selectedClass.id,
           className: selectedClass.name,
+          timetableId: selectedSlot.id,
+          subjectId: selectedSlot.subjectId,
           date: today,
           teacherId: profile.uid,
           studentId,
@@ -120,17 +149,36 @@ export const Attendance: React.FC = () => {
               <ClipboardCheck className="w-6 h-6 text-indigo-600" />
               Mark Attendance
             </h3>
-            <select 
-              className="px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[200px]"
-              value={selectedClass?.id || ''}
-              onChange={(e) => setSelectedClass(classes.find(c => c.id === e.target.value) || null)}
-            >
-              <option value="">Select Class</option>
-              {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+            <div className="flex flex-col md:flex-row gap-4">
+              <select 
+                className="px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[200px]"
+                value={selectedClass?.id || ''}
+                onChange={(e) => {
+                  const cls = classes.find(c => c.id === e.target.value) || null;
+                  setSelectedClass(cls);
+                  setSelectedSlot(null);
+                }}
+              >
+                <option value="">Select Class</option>
+                {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+
+              {selectedClass && (
+                <select 
+                  className="px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 min-w-[200px]"
+                  value={selectedSlot?.id || ''}
+                  onChange={(e) => setSelectedSlot(timetable.find(t => t.id === e.target.value) || null)}
+                >
+                  <option value="">Select Today's Slot</option>
+                  {timetable.filter(t => t.classId === selectedClass.id).map(t => (
+                    <option key={t.id} value={t.id}>{t.startTime} - {t.endTime}</option>
+                  ))}
+                </select>
+              )}
+            </div>
           </div>
 
-          {selectedClass ? (
+          {selectedClass && selectedSlot ? (
             <div className="space-y-6">
               {message.text && (
                 <div className={`p-4 rounded-2xl flex items-center gap-3 text-sm ${message.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
@@ -208,6 +256,9 @@ export const Attendance: React.FC = () => {
               <div className="flex justify-between items-start mb-4">
                 <div>
                   <p className="font-bold text-slate-900">{record.className}</p>
+                  <p className="text-[10px] font-bold text-indigo-600">
+                    {subjects.find(s => s.id === record.subjectId)?.name || 'General'}
+                  </p>
                   <p className="text-xs text-slate-500">{record.date}</p>
                 </div>
                 {isStudent && (

@@ -39,7 +39,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         unsubscribeProfile = onSnapshot(docRef, 
           (docSnap) => {
             if (docSnap.exists()) {
-              setProfile(docSnap.data() as UserProfile);
+              setProfile({ uid: docSnap.id, ...docSnap.data() } as UserProfile);
             }
             setLoading(false);
           },
