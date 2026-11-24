@@ -7,14 +7,39 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useUniversity } from '../../contexts/UniversityContext';
 import { AccountStatus, UserProfile, UserRole } from '../../types';
 import { ROLE_METADATA, normalizeRole } from '../../config/rbac';
-import { exportToCsv, logAudit } from '../../services/erpService';
+import { exportToCsv, logAudit, syncPublicProfile } from '../../services/erpService';
 import { BulkUpload } from '../../components/BulkUpload';
 import { Modal, PageHeader, SegmentedTabs, StatusText } from '../../components/ui/DataUI';
-import { Download, Edit2, Eye, Plus, Search, Trash2, Upload, UserPlus } from 'lucide-react';
+import { Download, Edit2, Eye, RefreshCw, Search, Trash2, UserPlus } from 'lucide-react';
+import {
+  generateCompliantTempPassword,
+  isInWhitelist,
+  sanitizeText,
+  validateAmount,
+  validateEmail,
+  validateEmployeeId,
+  validateFreeText,
+  validateName,
+  validatePasswordStrength,
+  validatePhone,
+  validateRollNo
+} from '../../utils/validation';
+
+const VALID_ROLES = Object.keys(ROLE_METADATA) as UserRole[];
+const VALID_STATUSES: AccountStatus[] = [
+  'active',
+  'inactive',
+  'suspended',
+  'graduated',
+  'alumni',
+  'on_leave',
+  'exited',
+  'revoked'
+];
 
 export const UserManagement: React.FC = () => {
   const { profile } = useAuth();
-  const { users, departments, programs, batches, classes } = useUniversity();
+  const { users, departments, programs, classes } = useUniversity();
 
   const [activeTab, setActiveTab] = useState<'directory' | 'create' | 'bulk'>('directory');
   const [searchTerm, setSearchTerm] = useState('');
@@ -33,14 +58,20 @@ export const UserManagement: React.FC = () => {
   const [newUser, setNewUser] = useState({
     name: '', email: '', role: 'student' as UserRole, idCode: '', phone: '',
     departmentId: '', programId: '', batchId: '', classId: '', section: '',
-    guardianName: '', guardianPhone: '', designation: '', salaryBasic: 0
+    guardianName: '', guardianPhone: '', designation: '', salaryBasic: 0,
+    initialPassword: generateCompliantTempPassword()
   });
+  const [createErrors, setCreateErrors] = useState<Record<string, string>>({});
   const [creating, setCreating] = useState(false);
   const [createMsg, setCreateMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Edit modal
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [editForm, setEditForm] = useState<Partial<UserProfile>>({});
+  const [editErrors, setEditErrors] = useState<Record<string, string>>({});
+
+  // Delete confirmation modal
+  const [deleteTarget, setDeleteTarget] = useState<UserProfile | null>(null);
 
   const filtered = useMemo(() => {
     const q = searchTerm.toLowerCase();
@@ -68,50 +99,112 @@ export const UserManagement: React.FC = () => {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    setCreating(true);
     setCreateMsg(null);
-    try {
-      const prefix = newUser.role === 'student' ? 'stu' : 'staff';
-      const finalEmail = newUser.email || `${prefix}${newUser.idCode || Date.now()}@arambh.edu`;
-      const secondaryAuth = getSecondaryAuth();
-      const cred = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, 'arambh123');
-      const uid = cred.user.uid;
 
-      await setDoc(doc(db, 'users', uid), {
+    const errors: Record<string, string> = {};
+    const nameErr = validateName(newUser.name, 'Full name');
+    if (nameErr) errors.name = nameErr;
+
+    if (!isInWhitelist(newUser.role, VALID_ROLES)) {
+      errors.role = 'Select a valid institutional role.';
+    }
+
+    const idErr = newUser.role === 'student'
+      ? validateRollNo(newUser.idCode, true)
+      : validateEmployeeId(newUser.idCode, true);
+    if (idErr) errors.idCode = idErr;
+
+    const prefix = newUser.role === 'student' ? 'stu' : 'staff';
+    const candidateEmail = (newUser.email || `${prefix}${sanitizeText(newUser.idCode)}@arambh.edu`).trim();
+    const emailErr = validateEmail(candidateEmail, true);
+    if (emailErr) errors.email = emailErr;
+
+    const phoneErr = validatePhone(newUser.phone, false, 'Phone');
+    if (phoneErr) errors.phone = phoneErr;
+
+    if (newUser.guardianName.trim()) {
+      const gNameErr = validateName(newUser.guardianName, 'Guardian name');
+      if (gNameErr) errors.guardianName = gNameErr;
+    }
+
+    const gPhoneErr = validatePhone(newUser.guardianPhone, false, 'Guardian phone');
+    if (gPhoneErr) errors.guardianPhone = gPhoneErr;
+
+    const desigErr = validateFreeText(newUser.designation, { required: false, maxLen: 80, label: 'Designation' });
+    if (desigErr) errors.designation = desigErr;
+
+    const salaryErr = validateAmount(newUser.salaryBasic, { min: 0, max: 10_000_000, label: 'Monthly Base Salary' });
+    if (salaryErr) errors.salaryBasic = salaryErr;
+
+    const pwdCheck = validatePasswordStrength(newUser.initialPassword, newUser.initialPassword);
+    if (!pwdCheck.valid && pwdCheck.error) {
+      errors.initialPassword = pwdCheck.error;
+    }
+
+    setCreateErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      setCreateMsg({ type: 'error', text: 'Please correct the highlighted fields before provisioning.' });
+      return;
+    }
+
+    setCreating(true);
+    try {
+      const secondaryAuth = getSecondaryAuth();
+      const cred = await createUserWithEmailAndPassword(secondaryAuth, candidateEmail, newUser.initialPassword);
+      const uid = cred.user.uid;
+      const cleanName = sanitizeText(newUser.name);
+      const cleanId = sanitizeText(newUser.idCode);
+
+      const userPayload: Record<string, any> = {
         uid,
-        name: newUser.name,
-        email: finalEmail,
+        name: cleanName,
+        email: candidateEmail,
         role: newUser.role,
         status: 'active',
-        phone: newUser.phone,
+        phone: sanitizeText(newUser.phone),
         departmentId: newUser.departmentId,
         programId: newUser.programId,
         batchId: newUser.batchId,
         classId: newUser.classId,
-        section: newUser.section,
-        guardianName: newUser.guardianName,
-        guardianPhone: newUser.guardianPhone,
-        designation: newUser.designation,
+        section: sanitizeText(newUser.section),
+        guardianName: sanitizeText(newUser.guardianName),
+        guardianPhone: sanitizeText(newUser.guardianPhone),
+        designation: sanitizeText(newUser.designation),
         salaryBasic: Number(newUser.salaryBasic) || 0,
-        [newUser.role === 'student' ? 'rollNo' : 'employeeId']: newUser.idCode,
+        [newUser.role === 'student' ? 'rollNo' : 'employeeId']: cleanId,
         isFirstLogin: true,
         createdAt: serverTimestamp()
-      });
+      };
+
+      await setDoc(doc(db, 'users', uid), userPayload);
+      await syncPublicProfile(uid, userPayload);
 
       if (newUser.role === 'student' && newUser.classId) {
         await updateDoc(doc(db, 'classes', newUser.classId), { students: arrayUnion(uid) });
       }
 
       await secondaryAuth.signOut();
-      await logAudit(profile, 'CREATE_USER', 'Users', uid, `Provisioned ${newUser.role}: ${newUser.name} (${finalEmail})`);
-      setCreateMsg({ type: 'success', text: `Account provisioned! Email: ${finalEmail} · Default Password: arambh123` });
+      await logAudit(profile, 'CREATE_USER', 'Users', uid, `Provisioned ${newUser.role}: ${cleanName} (${candidateEmail})`);
+      setCreateMsg({
+        type: 'success',
+        text: `Account provisioned for ${candidateEmail}. Temporary password (must be changed on first sign-in): ${newUser.initialPassword}`
+      });
+      setCreateErrors({});
       setNewUser({
         name: '', email: '', role: 'student', idCode: '', phone: '',
         departmentId: '', programId: '', batchId: '', classId: '', section: '',
-        guardianName: '', guardianPhone: '', designation: '', salaryBasic: 0
+        guardianName: '', guardianPhone: '', designation: '', salaryBasic: 0,
+        initialPassword: generateCompliantTempPassword()
       });
     } catch (err: any) {
-      setCreateMsg({ type: 'error', text: err.message || 'Failed to provision user' });
+      console.error('Provision user error:', err);
+      const code = String(err?.code || '');
+      setCreateMsg({
+        type: 'error',
+        text: code === 'auth/email-already-in-use'
+          ? 'An authentication account with this email already exists.'
+          : 'Failed to provision user account. Verify configuration and permissions.'
+      });
     } finally {
       setCreating(false);
     }
@@ -120,33 +213,74 @@ export const UserManagement: React.FC = () => {
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
-    await setDoc(doc(db, 'users', editingUser.uid), editForm, { merge: true });
+
+    const errors: Record<string, string> = {};
+    const nameErr = validateName(editForm.name || '', 'Full name');
+    if (nameErr) errors.name = nameErr;
+
+    const roleVal = String(editForm.role || 'student');
+    if (!isInWhitelist(roleVal, VALID_ROLES)) errors.role = 'Invalid role selected.';
+
+    const statusVal = String(editForm.status || 'active');
+    if (!isInWhitelist(statusVal, VALID_STATUSES)) errors.status = 'Invalid status selected.';
+
+    const idVal = roleVal === 'student' ? (editForm.rollNo || '') : (editForm.employeeId || '');
+    if (idVal) {
+      const idErr = roleVal === 'student' ? validateRollNo(idVal, false) : validateEmployeeId(idVal, false);
+      if (idErr) errors.idCode = idErr;
+    }
+
+    setEditErrors(errors);
+    if (Object.keys(errors).length > 0) return;
+
+    const cleanName = sanitizeText(editForm.name || editingUser.name);
+    const updatedFields: Partial<UserProfile> = {
+      ...editForm,
+      name: cleanName,
+      role: roleVal as UserRole,
+      status: statusVal as AccountStatus
+    };
+
+    await setDoc(doc(db, 'users', editingUser.uid), updatedFields, { merge: true });
+    await syncPublicProfile(editingUser.uid, { ...editingUser, ...updatedFields });
+
     if (editForm.role === 'student' && editForm.classId) {
       await updateDoc(doc(db, 'classes', editForm.classId), { students: arrayUnion(editingUser.uid) });
     }
-    await logAudit(profile, 'UPDATE_USER', 'Users', editingUser.uid, `Updated user ${editForm.name}`);
+    await logAudit(profile, 'UPDATE_USER', 'Users', editingUser.uid, `Updated user ${cleanName}`);
     setEditingUser(null);
+    setEditErrors({});
   };
 
   const handleBulkAssignClass = async () => {
     if (!bulkClassId || selectedUids.length === 0) return;
-    await Promise.all(selectedUids.map(uid => updateDoc(doc(db, 'users', uid), { classId: bulkClassId })));
+    await Promise.all(selectedUids.map(async uid => {
+      await updateDoc(doc(db, 'users', uid), { classId: bulkClassId });
+      const existing = users.find(u => u.uid === uid);
+      if (existing) await syncPublicProfile(uid, { ...existing, classId: bulkClassId });
+    }));
     await updateDoc(doc(db, 'classes', bulkClassId), { students: arrayUnion(...selectedUids) });
     await logAudit(profile, 'BULK_CLASS_ASSIGN', 'Users', bulkClassId, `Assigned ${selectedUids.length} users to class`);
     setSelectedUids([]);
   };
 
   const handleBulkStatus = async () => {
-    if (selectedUids.length === 0) return;
-    await Promise.all(selectedUids.map(uid => updateDoc(doc(db, 'users', uid), { status: bulkStatus })));
+    if (selectedUids.length === 0 || !isInWhitelist(bulkStatus, VALID_STATUSES)) return;
+    await Promise.all(selectedUids.map(async uid => {
+      await updateDoc(doc(db, 'users', uid), { status: bulkStatus });
+      const existing = users.find(u => u.uid === uid);
+      if (existing) await syncPublicProfile(uid, { ...existing, status: bulkStatus });
+    }));
     await logAudit(profile, 'BULK_STATUS_UPDATE', 'Users', 'bulk', `Updated ${selectedUids.length} users to ${bulkStatus}`);
     setSelectedUids([]);
   };
 
-  const handleDeleteUser = async (u: UserProfile) => {
-    if (!window.confirm(`Remove ${u.name} from university directory?`)) return;
-    await deleteDoc(doc(db, 'users', u.uid));
-    await logAudit(profile, 'DELETE_USER', 'Users', u.uid, `Removed ${u.name}`);
+  const confirmDeleteUser = async () => {
+    if (!deleteTarget) return;
+    await deleteDoc(doc(db, 'users', deleteTarget.uid));
+    await deleteDoc(doc(db, 'publicProfiles', deleteTarget.uid)).catch(() => {});
+    await logAudit(profile, 'DELETE_USER', 'Users', deleteTarget.uid, `Removed ${deleteTarget.name}`);
+    setDeleteTarget(null);
   };
 
   return (
@@ -163,7 +297,7 @@ export const UserManagement: React.FC = () => {
                 id: u.rollNo || u.employeeId || '', status: u.status || 'active',
                 department: departments.find(d => d.id === u.departmentId)?.name || ''
               })))}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg hover:bg-zinc-50 dark:hover:bg-slate-800"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800"
             >
               <Download className="w-3.5 h-3.5" /> Export CSV
             </button>
@@ -191,7 +325,7 @@ export const UserManagement: React.FC = () => {
       {activeTab === 'bulk' && <BulkUpload onComplete={() => setActiveTab('directory')} />}
 
       {activeTab === 'create' && (
-        <form onSubmit={handleCreateUser} className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)] p-6 max-w-3xl space-y-4">
+        <form onSubmit={handleCreateUser} noValidate className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)] p-6 max-w-3xl space-y-4">
           <h3 className="text-base font-semibold">Provision New University Account</h3>
           {createMsg && (
             <div className={`p-3 rounded-lg text-xs border ${createMsg.type === 'success' ? 'bg-zinc-100 dark:bg-zinc-800 border-zinc-200 text-[#111111] dark:text-zinc-200' : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 text-rose-700 dark:text-rose-300'}`}>
@@ -201,7 +335,8 @@ export const UserManagement: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold mb-1">Full Name</label>
-              <input required value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              <input required maxLength={80} pattern="^[A-Za-z][A-Za-z\s.'-]{1,79}$" value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              {createErrors.name && <p className="mt-1 text-[11px] text-rose-600">{createErrors.name}</p>}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Portal Role</label>
@@ -210,14 +345,25 @@ export const UserManagement: React.FC = () => {
                   <option key={k} value={k}>{v.label}</option>
                 ))}
               </select>
+              {createErrors.role && <p className="mt-1 text-[11px] text-rose-600">{createErrors.role}</p>}
             </div>
             <div>
-              <label className="block text-xs font-semibold mb-1">{newUser.role === 'student' ? 'Student ID / Roll No' : 'Employee ID'}</label>
-              <input required value={newUser.idCode} onChange={e => setNewUser({ ...newUser, idCode: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              <label className="block text-xs font-semibold mb-1">{newUser.role === 'student' ? 'Student Roll No (10–12 alphanumeric)' : 'Employee ID'}</label>
+              <input
+                required
+                maxLength={newUser.role === 'student' ? 12 : 20}
+                pattern={newUser.role === 'student' ? '^[A-Za-z0-9]{10,12}$' : '^[A-Za-z0-9-]{3,20}$'}
+                placeholder={newUser.role === 'student' ? 'e.g. AR20261042' : 'e.g. EMP-1042'}
+                value={newUser.idCode}
+                onChange={e => setNewUser({ ...newUser, idCode: e.target.value })}
+                className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+              />
+              {createErrors.idCode && <p className="mt-1 text-[11px] text-rose-600">{createErrors.idCode}</p>}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Email (optional)</label>
-              <input type="email" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" placeholder="Auto-generated if blank" />
+              <input type="email" maxLength={254} value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" placeholder="Auto-generated if blank" />
+              {createErrors.email && <p className="mt-1 text-[11px] text-rose-600">{createErrors.email}</p>}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Department</label>
@@ -228,7 +374,30 @@ export const UserManagement: React.FC = () => {
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Phone</label>
-              <input value={newUser.phone} onChange={e => setNewUser({ ...newUser, phone: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              <input maxLength={15} pattern="^\+?[0-9\s-]{10,15}$" value={newUser.phone} onChange={e => setNewUser({ ...newUser, phone: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              {createErrors.phone && <p className="mt-1 text-[11px] text-rose-600">{createErrors.phone}</p>}
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-xs font-semibold mb-1">Initial Temporary Password (User must reset on first login)</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  required
+                  minLength={8}
+                  maxLength={128}
+                  value={newUser.initialPassword}
+                  onChange={e => setNewUser({ ...newUser, initialPassword: e.target.value })}
+                  className="flex-1 px-3 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+                />
+                <button
+                  type="button"
+                  onClick={() => setNewUser({ ...newUser, initialPassword: generateCompliantTempPassword() })}
+                  className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold border border-zinc-200 dark:border-zinc-700 rounded-lg hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Regenerate
+                </button>
+              </div>
+              {createErrors.initialPassword && <p className="mt-1 text-[11px] text-rose-600">{createErrors.initialPassword}</p>}
             </div>
             {newUser.role === 'student' && (
               <>
@@ -248,11 +417,13 @@ export const UserManagement: React.FC = () => {
                 </div>
                 <div>
                   <label className="block text-xs font-semibold mb-1">Guardian Name</label>
-                  <input value={newUser.guardianName} onChange={e => setNewUser({ ...newUser, guardianName: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  <input maxLength={80} value={newUser.guardianName} onChange={e => setNewUser({ ...newUser, guardianName: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  {createErrors.guardianName && <p className="mt-1 text-[11px] text-rose-600">{createErrors.guardianName}</p>}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold mb-1">Guardian Phone</label>
-                  <input value={newUser.guardianPhone} onChange={e => setNewUser({ ...newUser, guardianPhone: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  <input maxLength={15} value={newUser.guardianPhone} onChange={e => setNewUser({ ...newUser, guardianPhone: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  {createErrors.guardianPhone && <p className="mt-1 text-[11px] text-rose-600">{createErrors.guardianPhone}</p>}
                 </div>
               </>
             )}
@@ -260,11 +431,13 @@ export const UserManagement: React.FC = () => {
               <>
                 <div>
                   <label className="block text-xs font-semibold mb-1">Designation</label>
-                  <input value={newUser.designation} onChange={e => setNewUser({ ...newUser, designation: e.target.value })} placeholder="e.g. Associate Professor" className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  <input maxLength={80} value={newUser.designation} onChange={e => setNewUser({ ...newUser, designation: e.target.value })} placeholder="e.g. Associate Professor" className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  {createErrors.designation && <p className="mt-1 text-[11px] text-rose-600">{createErrors.designation}</p>}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold mb-1">Monthly Base Salary</label>
-                  <input type="number" value={newUser.salaryBasic} onChange={e => setNewUser({ ...newUser, salaryBasic: Number(e.target.value) })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  <input type="number" min={0} max={10000000} value={newUser.salaryBasic} onChange={e => setNewUser({ ...newUser, salaryBasic: Number(e.target.value) })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+                  {createErrors.salaryBasic && <p className="mt-1 text-[11px] text-rose-600">{createErrors.salaryBasic}</p>}
                 </div>
               </>
             )}
@@ -281,6 +454,7 @@ export const UserManagement: React.FC = () => {
             <div className="md:col-span-2 relative">
               <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
+                maxLength={100}
                 value={searchTerm}
                 onChange={e => { setSearchTerm(e.target.value); setPage(1); }}
                 placeholder="Search name, email, roll no, employee ID..."
@@ -316,7 +490,7 @@ export const UserManagement: React.FC = () => {
                 <option value="suspended">suspended</option>
                 <option value="graduated">graduated</option>
               </select>
-              <button type="button" onClick={handleBulkStatus} className="px-3 py-1 bg-slate-900 dark:bg-zinc-100 text-white dark:text-[#111111] rounded font-semibold">Set Status</button>
+              <button type="button" onClick={handleBulkStatus} className="px-3 py-1 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-[#111111] rounded font-semibold">Set Status</button>
             </div>
           )}
 
@@ -331,7 +505,7 @@ export const UserManagement: React.FC = () => {
                       onChange={e => setSelectedUids(e.target.checked ? paginated.map(u => u.uid) : [])}
                     />
                   </th>
-                  <th className="py-2.5 px-3 text-left font-semibold">Name & Email</th>
+                  <th className="py-2.5 px-3 text-left font-semibold">Name &amp; Email</th>
                   <th className="py-2.5 px-3 text-left font-semibold">Role</th>
                   <th className="py-2.5 px-3 text-left font-semibold">ID / Roll No</th>
                   <th className="py-2.5 px-3 text-left font-semibold">Department / Class</th>
@@ -344,7 +518,7 @@ export const UserManagement: React.FC = () => {
                   const dept = departments.find(d => d.id === u.departmentId)?.code;
                   const cls = classes.find(c => c.id === u.classId)?.name;
                   return (
-                    <tr key={u.uid} className="hover:bg-zinc-50 dark:hover:bg-slate-800/40">
+                    <tr key={u.uid} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
                       <td className="py-2.5 px-3">
                         <input
                           type="checkbox"
@@ -368,7 +542,7 @@ export const UserManagement: React.FC = () => {
                         )}
                         <button
                           type="button"
-                          onClick={() => { setEditingUser(u); setEditForm(u); }}
+                          onClick={() => { setEditingUser(u); setEditForm(u); setEditErrors({}); }}
                           className="text-[#52525B] hover:text-[#111111]"
                           title="Edit User"
                         >
@@ -376,7 +550,7 @@ export const UserManagement: React.FC = () => {
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleDeleteUser(u)}
+                          onClick={() => setDeleteTarget(u)}
                           className="text-[#52525B] hover:text-rose-600"
                           title="Delete User"
                         >
@@ -402,17 +576,19 @@ export const UserManagement: React.FC = () => {
       )}
 
       <Modal open={!!editingUser} onClose={() => setEditingUser(null)} title="Edit User Profile & Academic Assignment">
-        <form onSubmit={handleSaveEdit} className="space-y-4">
+        <form onSubmit={handleSaveEdit} noValidate className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold mb-1">Full Name</label>
-              <input required value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              <input required maxLength={80} value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              {editErrors.name && <p className="mt-1 text-[11px] text-rose-600">{editErrors.name}</p>}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Role</label>
               <select value={editForm.role || 'student'} onChange={e => setEditForm({ ...editForm, role: e.target.value as UserRole })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg">
                 {Object.entries(ROLE_METADATA).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
               </select>
+              {editErrors.role && <p className="mt-1 text-[11px] text-rose-600">{editErrors.role}</p>}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Status</label>
@@ -422,6 +598,7 @@ export const UserManagement: React.FC = () => {
                 <option value="suspended">Suspended</option>
                 <option value="graduated">Graduated</option>
               </select>
+              {editErrors.status && <p className="mt-1 text-[11px] text-rose-600">{editErrors.status}</p>}
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Department</label>
@@ -439,7 +616,8 @@ export const UserManagement: React.FC = () => {
             </div>
             <div>
               <label className="block text-xs font-semibold mb-1">Roll No / Employee ID</label>
-              <input value={editForm.rollNo || editForm.employeeId || ''} onChange={e => setEditForm({ ...editForm, [editForm.role === 'student' ? 'rollNo' : 'employeeId']: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              <input maxLength={20} value={editForm.rollNo || editForm.employeeId || ''} onChange={e => setEditForm({ ...editForm, [editForm.role === 'student' ? 'rollNo' : 'employeeId']: e.target.value })} className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg" />
+              {editErrors.idCode && <p className="mt-1 text-[11px] text-rose-600">{editErrors.idCode}</p>}
             </div>
           </div>
           <div className="flex justify-end gap-2 pt-2">
@@ -447,6 +625,18 @@ export const UserManagement: React.FC = () => {
             <button type="submit" className="px-4 py-2 text-xs bg-[#111111] dark:bg-white dark:text-zinc-950 text-white font-semibold rounded-lg">Save Changes</button>
           </div>
         </form>
+      </Modal>
+
+      <Modal open={!!deleteTarget} onClose={() => setDeleteTarget(null)} title="Confirm Account Removal">
+        <div className="space-y-4 text-xs">
+          <p className="text-[#52525B] dark:text-zinc-400">
+            Remove <span className="font-semibold text-[#111111] dark:text-zinc-100">{deleteTarget?.name}</span> from the university directory? This revokes their Firestore directory access immediately.
+          </p>
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setDeleteTarget(null)} className="px-4 py-2 border border-zinc-200 dark:border-zinc-700 rounded-lg">Cancel</button>
+            <button type="button" onClick={() => void confirmDeleteUser()} className="px-4 py-2 bg-rose-600 text-white font-semibold rounded-lg">Remove Account</button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

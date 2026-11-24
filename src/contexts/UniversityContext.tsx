@@ -27,7 +27,8 @@ import {
   UniversityProfile,
   UserProfile
 } from '../types';
-import { DEFAULT_GRADING_SCALE, DEFAULT_TIMETABLE_CONFIG } from '../services/erpService';
+import { DEFAULT_GRADING_SCALE, DEFAULT_TIMETABLE_CONFIG, syncPublicProfile } from '../services/erpService';
+import { normalizeRole } from '../config/rbac';
 
 interface UniversityContextType {
   university: UniversityProfile;
@@ -100,7 +101,7 @@ const defaultSettings: SystemSettings = {
 const UniversityContext = createContext<UniversityContextType | undefined>(undefined);
 
 export const UniversityProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user, profile, isAdmin, can } = useAuth();
+  const { user, profile, normalizedRole, isAdmin, can } = useAuth();
   const [university, setUniversity] = useState<UniversityProfile>(defaultUniversity);
   const [settings, setSettings] = useState<SystemSettings>(defaultSettings);
   const [campuses, setCampuses] = useState<Campus[]>([]);
@@ -127,9 +128,16 @@ export const UniversityProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [loading, setLoading] = useState(true);
 
   const uid = user?.uid;
+  const hasFullDirectoryAccess = Boolean(
+    profile &&
+    profile.role &&
+    !['student', 'parent', 'unassigned'].includes(normalizeRole(profile.role)) &&
+    !['student', 'parent', 'unassigned'].includes(normalizedRole)
+  );
 
   useEffect(() => {
     if (!uid) {
+      setUsers([]);
       setLoading(false);
       return;
     }
@@ -175,19 +183,37 @@ export const UniversityProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     safeListen('classes', setClasses);
     safeListen('academicEvents', setAcademicEvents);
 
-    unsubs.push(
-      onSnapshot(
-        collection(db, 'users'),
-        (snap) => {
-          setUsers(snap.docs.map(d => ({ uid: d.id, ...d.data() } as UserProfile)));
-          setLoading(false);
-        },
-        () => setLoading(false)
-      )
-    );
-
     return () => unsubs.forEach(u => u());
   }, [uid]);
+
+  // Separate effect for directory subscription so least-privilege /users vs /publicProfiles applies cleanly
+  useEffect(() => {
+    if (!uid) {
+      setUsers([]);
+      setLoading(false);
+      return;
+    }
+
+    if (profile?.uid && profile.role) {
+      void syncPublicProfile(profile.uid, profile);
+    }
+
+    const directoryCol = hasFullDirectoryAccess ? 'users' : 'publicProfiles';
+    const unsub = onSnapshot(
+      collection(db, directoryCol),
+      (snap) => {
+        const list = snap.docs.map(d => ({ uid: d.id, ...d.data() } as UserProfile));
+        if (!hasFullDirectoryAccess && profile && !list.some(u => u.uid === profile.uid)) {
+          list.push(profile);
+        }
+        setUsers(list);
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+
+    return () => unsub();
+  }, [uid, hasFullDirectoryAccess, profile?.uid, profile?.role]);
 
   const canManageHR = isAdmin || can('hr.manage');
   const canManageApprovals = isAdmin || can('approvals.manage');

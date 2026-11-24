@@ -7,6 +7,8 @@ import { useUniversity } from '../contexts/UniversityContext';
 import { PageHeader, SegmentedTabs, StatusText } from '../components/ui/DataUI';
 import { UserProfile } from '../types';
 import { ArrowLeft, Printer, Save } from 'lucide-react';
+import { syncPublicProfile } from '../services/erpService';
+import { sanitizeText, validateBloodGroup, validateName, validatePhone } from '../utils/validation';
 
 export const StudentProfile360: React.FC = () => {
   const { studentId } = useParams<{ studentId: string }>();
@@ -18,6 +20,7 @@ export const StudentProfile360: React.FC = () => {
   const [tab, setTab] = useState('overview');
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<UserProfile>>({});
+  const [saveError, setSaveError] = useState('');
 
   const [attendance, setAttendance] = useState<any[]>([]);
   const [timetable, setTimetable] = useState<any[]>([]);
@@ -101,20 +104,30 @@ export const StudentProfile360: React.FC = () => {
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaveError('');
+    const nameErr = validateName(form.name || student.name, 'Full Name');
+    if (nameErr) return setSaveError(nameErr);
+    const phoneErr = validatePhone(form.phone || '', false, 'Phone');
+    if (phoneErr) return setSaveError(phoneErr);
+    const bloodErr = validateBloodGroup(form.bloodGroup || '');
+    if (bloodErr) return setSaveError(bloodErr);
+
+    const cleanName = sanitizeText(form.name || student.name);
     await updateDoc(doc(db, 'users', student.uid), {
-      name: form.name || student.name,
-      phone: form.phone || '',
+      name: cleanName,
+      phone: sanitizeText(form.phone || ''),
       gender: form.gender || 'other',
       dob: form.dob || '',
-      address: form.address || '',
-      bloodGroup: form.bloodGroup || '',
-      emergencyContactName: form.emergencyContactName || '',
-      emergencyContactPhone: form.emergencyContactPhone || '',
-      guardianName: form.guardianName || '',
-      guardianPhone: form.guardianPhone || '',
-      guardianEmail: form.guardianEmail || '',
-      guardianRelation: form.guardianRelation || ''
+      address: sanitizeText(form.address || ''),
+      bloodGroup: sanitizeText(form.bloodGroup || '').toUpperCase(),
+      emergencyContactName: sanitizeText(form.emergencyContactName || ''),
+      emergencyContactPhone: sanitizeText(form.emergencyContactPhone || ''),
+      guardianName: sanitizeText(form.guardianName || ''),
+      guardianPhone: sanitizeText(form.guardianPhone || ''),
+      guardianEmail: (form.guardianEmail || '').trim(),
+      guardianRelation: sanitizeText(form.guardianRelation || '')
     });
+    await syncPublicProfile(student.uid, { ...student, name: cleanName });
     setEditing(false);
   };
 
@@ -174,10 +187,11 @@ export const StudentProfile360: React.FC = () => {
 
       {tab === 'overview' && (
         <form onSubmit={handleSaveProfile} className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)] p-6 space-y-6">
+          {saveError && <p className="text-xs text-rose-600 bg-rose-50 dark:bg-rose-950/40 p-2.5 rounded-lg">{saveError}</p>}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
             <div>
               <label className="block font-semibold text-[#52525B] mb-1">Full Name</label>
-              <input disabled={!editing} value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg disabled:opacity-75" />
+              <input maxLength={80} disabled={!editing} value={form.name || ''} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg disabled:opacity-75" />
             </div>
             <div>
               <label className="block font-semibold text-[#52525B] mb-1">Email</label>

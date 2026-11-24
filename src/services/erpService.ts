@@ -1,4 +1,4 @@
-import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { addDoc, collection, doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import {
   Class,
@@ -9,6 +9,7 @@ import {
   TimetableSlotConfig,
   UserProfile
 } from '../types';
+import { hashIdentifier, maskEmail, sanitizeText } from '../utils/validation';
 
 export const DEFAULT_GRADING_SCALE: GradeBand[] = [
   { grade: 'O', minPercentage: 90, maxPercentage: 100, gradePoint: 10, remarks: 'Outstanding' },
@@ -49,12 +50,12 @@ export async function logAudit(
   try {
     await addDoc(collection(db, 'auditLogs'), {
       actorId: actor.uid,
-      actorName: actor.name || 'System User',
-      actorRole: actor.role || 'unknown',
-      action,
-      module,
-      targetId,
-      details,
+      actorName: sanitizeText(actor.name || 'System User').slice(0, 120) || 'System User',
+      actorRole: sanitizeText(String(actor.role || 'unknown')).slice(0, 60) || 'unknown',
+      action: sanitizeText(action).slice(0, 80) || 'ACTION',
+      module: sanitizeText(module).slice(0, 80) || 'System',
+      targetId: sanitizeText(targetId || '').slice(0, 120),
+      details: sanitizeText(details).slice(0, 500) || 'Event recorded',
       timestamp: serverTimestamp()
     });
   } catch (err) {
@@ -62,17 +63,75 @@ export async function logAudit(
   }
 }
 
+export async function logLoginEvent(
+  email: string,
+  outcome: 'success' | 'failure' | 'locked',
+  uid: string | null = null,
+  reason = ''
+) {
+  try {
+    const emailHash = await hashIdentifier(email || 'unknown');
+    await addDoc(collection(db, 'loginEvents'), {
+      emailMasked: maskEmail(email || 'unknown@unknown'),
+      emailHash,
+      outcome,
+      reason: sanitizeText(reason).slice(0, 100),
+      uid: outcome === 'success' && uid ? uid : null,
+      timestamp: serverTimestamp()
+    });
+  } catch (err) {
+    console.warn('Login event logging skipped:', err);
+  }
+}
+
+export async function syncPublicProfile(uid: string, data: Partial<UserProfile>) {
+  if (!uid || !data.name || !data.role) return;
+  try {
+    const rolesList = Array.isArray(data.roles) && data.roles.length > 0 ? data.roles.slice(0, 10) : [String(data.role)];
+    await setDoc(
+      doc(db, 'publicProfiles', uid),
+      {
+        uid,
+        name: sanitizeText(data.name).slice(0, 80),
+        role: String(data.role),
+        roles: rolesList,
+        departmentId: sanitizeText(data.departmentId || '').slice(0, 80),
+        campusId: sanitizeText(data.campusId || '').slice(0, 80),
+        facultyId: sanitizeText(data.facultyId || '').slice(0, 80),
+        officeId: sanitizeText(data.officeId || '').slice(0, 80),
+        teamId: sanitizeText(data.teamId || '').slice(0, 80),
+        designation: sanitizeText(data.designation || '').slice(0, 80),
+        classId: sanitizeText(data.classId || '').slice(0, 80),
+        programId: sanitizeText(data.programId || '').slice(0, 80),
+        photoUrl: sanitizeText(data.photoUrl || '').slice(0, 500),
+        status: data.status || 'active',
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Public profile sync skipped:', err);
+  }
+}
+
+const FORMULA_TRIGGER_REGEX = /^[\s]*[=+\-@\t\r]/;
+
+export function sanitizeCsvCell(val: any): string {
+  if (val === null || val === undefined) return '';
+  let str = typeof val === 'object' ? JSON.stringify(val) : String(val);
+  // Prevent CSV / spreadsheet formula injection (CWE-1236)
+  if (/^[=+\-@\t\r]/.test(str) || FORMULA_TRIGGER_REGEX.test(str)) {
+    str = `'${str}`;
+  }
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
 export function exportToCsv(filename: string, rows: Record<string, any>[]) {
   if (!rows.length) return;
   const headers = Array.from(new Set(rows.flatMap(r => Object.keys(r))));
-  const escape = (val: any) => {
-    if (val === null || val === undefined) return '';
-    const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
-    return `"${str.replace(/"/g, '""')}"`;
-  };
   const csv = [
-    headers.join(','),
-    ...rows.map(row => headers.map(h => escape(row[h])).join(','))
+    headers.map(h => sanitizeCsvCell(h)).join(','),
+    ...rows.map(row => headers.map(h => sanitizeCsvCell(row[h])).join(','))
   ].join('\n');
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });

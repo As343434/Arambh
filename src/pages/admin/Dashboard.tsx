@@ -6,6 +6,8 @@ import { db, auth } from '../../firebase';
 import { Users, BookOpen, Bell, Calendar, UserPlus, GraduationCap, CheckCircle2, AlertCircle, Upload, FileSpreadsheet, Loader2, Plus, Trash2 } from 'lucide-react';
 import { motion } from 'motion/react';
 import Papa from 'papaparse';
+import { syncPublicProfile } from '../../services/erpService';
+import { generateCompliantTempPassword, sanitizeText } from '../../utils/validation';
 
 // Helper to create users without signing out the admin
 // In a real app, use Cloud Functions. For this prototype, we use a secondary app instance.
@@ -44,7 +46,6 @@ export const AdminDashboard: React.FC = () => {
   const [idValue, setIdValue] = useState(''); // Roll No or Employee ID
   const [selectedClassId, setSelectedClassId] = useState('');
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('arambh123'); // Default password
   const [regLoading, setRegLoading] = useState(false);
   const [regMessage, setRegMessage] = useState({ type: '', text: '' });
 
@@ -100,39 +101,41 @@ export const AdminDashboard: React.FC = () => {
     setRegMessage({ type: '', text: '' });
 
     try {
-      const finalEmail = email || (regType === 'student' ? `roll${idValue}@arambh.com` : `emp${idValue}@arambh.com`);
-      
-      // Use secondary auth to avoid signing out the admin
-      const secondaryAuth = getSecondaryAuth();
-      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, password);
-      const user = userCredential.user;
-      
-      console.log('User created in Auth with UID:', user.uid);
+      const cleanName = sanitizeText(name);
+      const cleanId = sanitizeText(idValue);
+      const finalEmail = (email || (regType === 'student' ? `roll${cleanId}@arambh.edu` : `emp${cleanId}@arambh.edu`)).trim();
+      const tempPassword = generateCompliantTempPassword();
 
-      await setDoc(doc(db, 'users', user.uid), {
+      const secondaryAuth = getSecondaryAuth();
+      const userCredential = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, tempPassword);
+      const user = userCredential.user;
+
+      const userPayload: Record<string, any> = {
         uid: user.uid,
-        name,
+        name: cleanName,
         email: finalEmail,
         role: regType,
-        [regType === 'student' ? 'rollNo' : 'employeeId']: idValue,
+        status: 'active',
+        [regType === 'student' ? 'rollNo' : 'employeeId']: cleanId,
         isFirstLogin: true,
         createdAt: serverTimestamp()
-      });
+      };
 
-      // Assign to class if student and class selected
+      await setDoc(doc(db, 'users', user.uid), userPayload);
+      await syncPublicProfile(user.uid, userPayload);
+
       if (regType === 'student' && selectedClassId) {
         await updateDoc(doc(db, 'classes', selectedClassId), {
           students: arrayUnion(user.uid)
         });
       }
 
-      // Sign out from secondary auth immediately
       await secondaryAuth.signOut();
 
       const typeLabel = regType ? regType.charAt(0).toUpperCase() + regType.slice(1) : 'User';
-      setRegMessage({ 
-        type: 'success', 
-        text: `${typeLabel} registered successfully! Login Email: ${finalEmail}` 
+      setRegMessage({
+        type: 'success',
+        text: `${typeLabel} registered! Email: ${finalEmail} · Temporary Password: ${tempPassword}`
       });
       setName('');
       setIdValue('');
@@ -140,7 +143,8 @@ export const AdminDashboard: React.FC = () => {
       setSelectedClassId('');
       fetchStats();
     } catch (error: any) {
-      setRegMessage({ type: 'error', text: error.message || 'Failed to register user.' });
+      console.error('Admin register error:', error);
+      setRegMessage({ type: 'error', text: 'Failed to register user.' });
     } finally {
       setRegLoading(false);
     }
@@ -171,23 +175,24 @@ export const AdminDashboard: React.FC = () => {
             const { name, id, email, role, className } = row;
             if (!name || !id || !role) throw new Error(`Missing required fields for row ${i + 1}`);
             
-            const finalEmail = email || (role === 'student' ? `roll${id}@arambh.com` : `emp${id}@arambh.com`);
-            const finalPassword = 'arambh123';
+            const finalEmail = (email || (role === 'student' ? `roll${id}@arambh.edu` : `emp${id}@arambh.edu`)).trim();
+            const finalPassword = generateCompliantTempPassword();
 
-            // 1. Create User
             const userCredential = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, finalPassword);
             const user = userCredential.user;
-
-            // 2. Create Profile
-            await setDoc(doc(db, 'users', user.uid), {
+            const bulkPayload: Record<string, any> = {
               uid: user.uid,
-              name,
+              name: sanitizeText(name),
               email: finalEmail,
               role,
-              [role === 'student' ? 'rollNo' : 'employeeId']: id,
+              status: 'active',
+              [role === 'student' ? 'rollNo' : 'employeeId']: sanitizeText(id),
               isFirstLogin: true,
               createdAt: serverTimestamp()
-            });
+            };
+
+            await setDoc(doc(db, 'users', user.uid), bulkPayload);
+            await syncPublicProfile(user.uid, bulkPayload);
 
             // 3. Assign to Class if mentioned
             if (className && role === 'student') {
@@ -242,14 +247,12 @@ export const AdminDashboard: React.FC = () => {
       setSubjectName('');
       setSubjectCode('');
     } catch (err) {
-      alert('Error saving subject');
+      console.error('Error saving subject:', err);
     }
   };
 
   const handleDeleteSubject = async (id: string) => {
-    if (window.confirm('Are you sure you want to delete this subject?')) {
-      await deleteDoc(doc(db, 'subjects', id));
-    }
+    await deleteDoc(doc(db, 'subjects', id));
   };
 
   if (loading) return <div className="animate-pulse space-y-8">
@@ -600,10 +603,9 @@ export const AdminDashboard: React.FC = () => {
               </div>
             )}
 
-            <div className="p-4 bg-zinc-100 rounded-2xl border border-amber-100">
+            <div className="p-4 bg-zinc-100 rounded-2xl border border-zinc-200">
               <p className="text-xs text-[#27272A] font-medium">
-                <strong>Note:</strong> The default password will be <code className="bg-amber-100 px-1 rounded">arambh123</code>. 
-                The user will be forced to change it on their first login.
+                <strong>Security Policy:</strong> A unique 12-character temporary password is generated on creation. The user must replace it on first sign-in.
               </p>
             </div>
 

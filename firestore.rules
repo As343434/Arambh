@@ -179,8 +179,191 @@ service cloud.firestore {
         hasAnyRole(['hostel_warden', 'it_administrator', 'student_affairs_officer', 'placement_officer', 'support_staff']);
     }
 
+    function isLegitimateDirectoryReader() {
+      return isAdmin() ||
+        isHR() ||
+        isRegistrarOrAdmissions() ||
+        isAcademicLeader() ||
+        isFaculty() ||
+        isExamStaff() ||
+        isFinance() ||
+        isLibraryStaff() ||
+        isHostelStaff() ||
+        isTransportStaff() ||
+        isPlacementStaff() ||
+        isSupportStaff() ||
+        isDisciplineStaff();
+    }
+
     // =========================================================================
-    // 3. INSTITUTIONAL CONFIG, RBAC & APPROVAL ENGINE
+    // 3. SCHEMA, TYPE & LENGTH VALIDATION HELPERS
+    // =========================================================================
+    function isValidStr(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptStr(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isOptNum(data, field, minVal, maxVal) {
+      return !(field in data) || ((data[field] is int || data[field] is float) && data[field] >= minVal && data[field] <= maxVal);
+    }
+
+    function isValidUserCreate(data, userId) {
+      return data.uid == userId &&
+        isValidStr(data.name, 2, 80) &&
+        isValidStr(data.email, 3, 254) &&
+        isValidStr(data.role, 2, 40) &&
+        data.role != 'unassigned' &&
+        isOptStr(data, 'phone', 20) &&
+        isOptStr(data, 'rollNo', 20) &&
+        isOptStr(data, 'employeeId', 20) &&
+        isOptStr(data, 'status', 20) &&
+        isOptNum(data, 'salaryBasic', 0, 10000000);
+    }
+
+    function isValidSelfUserCreate(data, userId) {
+      return request.auth.uid == userId &&
+        data.uid == userId &&
+        data.role == 'unassigned' &&
+        !('roles' in data) &&
+        !('permissionOverrides' in data) &&
+        !('permissionExpiresAt' in data) &&
+        !('salaryBasic' in data) &&
+        !('salaryAllowances' in data) &&
+        (!('status' in data) || data.status == 'inactive') &&
+        isValidStr(data.name, 2, 80) &&
+        isValidStr(data.email, 3, 254);
+    }
+
+    function isValidUserUpdate(data, oldData) {
+      return data.uid == oldData.uid &&
+        isOptStr(data, 'name', 80) &&
+        isOptStr(data, 'phone', 20) &&
+        isOptStr(data, 'address', 240) &&
+        isOptStr(data, 'photoUrl', 500) &&
+        isOptStr(data, 'bloodGroup', 10) &&
+        isOptStr(data, 'emergencyContactName', 80) &&
+        isOptStr(data, 'emergencyContactPhone', 20) &&
+        isOptStr(data, 'guardianPhone', 20) &&
+        isOptStr(data, 'guardianEmail', 254) &&
+        isOptNum(data, 'salaryBasic', 0, 10000000);
+    }
+
+    function isValidPublicProfile(data, userId) {
+      return data.keys().hasOnly([
+          'uid', 'name', 'role', 'roles', 'departmentId', 'campusId',
+          'facultyId', 'officeId', 'teamId', 'designation', 'classId',
+          'programId', 'photoUrl', 'status', 'updatedAt'
+        ]) &&
+        data.uid == userId &&
+        isValidStr(data.name, 1, 80) &&
+        isValidStr(data.role, 2, 40) &&
+        isOptStr(data, 'departmentId', 80) &&
+        isOptStr(data, 'campusId', 80) &&
+        isOptStr(data, 'facultyId', 80) &&
+        isOptStr(data, 'officeId', 80) &&
+        isOptStr(data, 'teamId', 80) &&
+        isOptStr(data, 'designation', 80) &&
+        isOptStr(data, 'classId', 80) &&
+        isOptStr(data, 'programId', 80) &&
+        isOptStr(data, 'photoUrl', 500) &&
+        isOptStr(data, 'status', 20);
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasOnly([
+          'actorId', 'actorName', 'actorRole', 'action',
+          'module', 'targetId', 'details', 'timestamp'
+        ]) &&
+        data.keys().hasAll([
+          'actorId', 'actorName', 'actorRole', 'action',
+          'module', 'targetId', 'details', 'timestamp'
+        ]) &&
+        data.actorId == request.auth.uid &&
+        isValidStr(data.actorName, 1, 120) &&
+        isValidStr(data.actorRole, 1, 60) &&
+        isValidStr(data.action, 1, 80) &&
+        isValidStr(data.module, 1, 80) &&
+        data.targetId is string && data.targetId.size() <= 120 &&
+        isValidStr(data.details, 1, 500) &&
+        data.timestamp == request.time;
+    }
+
+    function isValidLoginEvent(data) {
+      return data.keys().hasOnly([
+          'emailMasked', 'emailHash', 'outcome', 'reason', 'uid', 'timestamp'
+        ]) &&
+        data.keys().hasAll([
+          'emailMasked', 'emailHash', 'outcome', 'reason', 'uid', 'timestamp'
+        ]) &&
+        isValidStr(data.emailMasked, 3, 120) &&
+        isValidStr(data.emailHash, 3, 64) &&
+        data.outcome in ['success', 'failure', 'locked'] &&
+        data.reason is string && data.reason.size() <= 100 &&
+        ((data.outcome == 'success' && isSignedIn() && data.uid == request.auth.uid) ||
+         (data.outcome != 'success' && data.uid == null)) &&
+        data.timestamp == request.time;
+    }
+
+    function isValidPayrollRecord(data) {
+      return isValidStr(data.staffId, 1, 128) &&
+        isOptStr(data, 'staffName', 100) &&
+        isOptNum(data, 'basicSalary', 0, 10000000) &&
+        isOptNum(data, 'allowances', 0, 10000000) &&
+        isOptNum(data, 'deductions', 0, 10000000) &&
+        isOptNum(data, 'netSalary', 0, 20000000) &&
+        (!('status' in data) || data.status in ['pending', 'processed', 'paid']);
+    }
+
+    function isValidInvoice(data) {
+      return isValidStr(data.studentId, 1, 128) &&
+        isValidStr(data.title, 1, 150) &&
+        (data.totalAmount is int || data.totalAmount is float) &&
+        data.totalAmount >= 0 && data.totalAmount <= 10000000 &&
+        (data.paidAmount is int || data.paidAmount is float) &&
+        data.paidAmount >= 0 && data.paidAmount <= data.totalAmount &&
+        data.status in ['unpaid', 'partial', 'paid', 'overdue', 'waived'];
+    }
+
+    function isValidPayment(data) {
+      return isValidStr(data.studentId, 1, 128) &&
+        (data.amount is int || data.amount is float) &&
+        data.amount > 0 && data.amount <= 10000000 &&
+        data.status in ['completed', 'pending', 'refunded', 'failed'];
+    }
+
+    function isValidFeeStructure(data) {
+      return isValidStr(data.name, 1, 120) &&
+        isOptNum(data, 'amount', 0, 10000000) &&
+        isOptNum(data, 'tuitionFee', 0, 10000000);
+    }
+
+    function isValidScholarship(data) {
+      return isValidStr(data.name, 1, 120) &&
+        isOptNum(data, 'amount', 0, 10000000);
+    }
+
+    function isValidExamMark(data) {
+      return isValidStr(data.studentId, 1, 128) &&
+        isValidStr(data.subjectId, 1, 128) &&
+        (data.maxMarks is int || data.maxMarks is float) &&
+        data.maxMarks > 0 && data.maxMarks <= 1000 &&
+        (data.totalMarks is int || data.totalMarks is float) &&
+        data.totalMarks >= 0 && data.totalMarks <= data.maxMarks &&
+        data.isPublished is bool;
+    }
+
+    function isValidAdmission(data) {
+      return isValidStr(data.applicantName, 2, 80) &&
+        isValidStr(data.email, 3, 254) &&
+        isOptNum(data, 'academicScore', 0, 100) &&
+        data.status in ['applied', 'under_review', 'shortlisted', 'approved', 'enrolled', 'rejected'];
+    }
+
+    // =========================================================================
+    // 4. INSTITUTIONAL CONFIG, RBAC & APPROVAL ENGINE
     // =========================================================================
     match /university_config/{docId} {
       allow read: if isSignedIn();
@@ -212,23 +395,30 @@ service cloud.firestore {
         isApprover() ||
         resource.data.requesterId == request.auth.uid
       );
-      allow create: if isSignedIn() && request.resource.data.requesterId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        request.resource.data.requesterId == request.auth.uid &&
+        isValidStr(request.resource.data.title, 2, 160);
       allow update: if isSignedIn() && isApprover();
       allow delete: if isAdmin();
     }
 
     // =========================================================================
-    // 4. USERS & PROFILES (WITH FIELD-LEVEL & ROLE PROTECTIONS)
+    // 5. USERS & NON-PII PUBLIC DIRECTORY PROFILES
     // =========================================================================
     match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && (
+      allow read: if isSignedIn() && (
         request.auth.uid == userId ||
-        isAdmin() ||
-        isHR() ||
-        isRegistrarOrAdmissions()
+        isLegitimateDirectoryReader() ||
+        isParentOf(userId)
       );
-      allow update: if isSignedIn() && (
+
+      allow create: if isSignedIn() && (
+        ((isAdmin() || isHR() || isRegistrarOrAdmissions()) && isValidUserCreate(request.resource.data, userId)) ||
+        isValidSelfUserCreate(request.resource.data, userId)
+      );
+
+      allow update: if isSignedIn() &&
+        isValidUserUpdate(request.resource.data, resource.data) && (
         isAdmin() ||
         isHR() ||
         isRegistrarOrAdmissions() ||
@@ -246,7 +436,7 @@ service cloud.firestore {
         ) ||
         (request.auth.uid == userId &&
           !request.resource.data.diff(resource.data).affectedKeys().hasAny([
-            'role', 'roles', 'permissionOverrides', 'permissionExpiresAt', 'status',
+            'uid', 'role', 'roles', 'permissionOverrides', 'permissionExpiresAt', 'status',
             'rollNo', 'studentId', 'programId', 'departmentId', 'campusId', 'facultyId',
             'semesterId', 'semesterNumber', 'batchId', 'classId', 'registrationHold',
             'registrationHoldReason', 'academicStanding', 'employeeId',
@@ -254,11 +444,24 @@ service cloud.firestore {
           ])
         )
       );
+
+      allow delete: if isAdmin();
+    }
+
+    match /publicProfiles/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() &&
+        isValidPublicProfile(request.resource.data, userId) && (
+        isAdmin() ||
+        isHR() ||
+        isRegistrarOrAdmissions() ||
+        (request.auth.uid == userId && userDocExists() && request.resource.data.role == getUserData().role)
+      );
       allow delete: if isAdmin();
     }
 
     // =========================================================================
-    // 5. INFRASTRUCTURE, ORGANIZATIONAL HIERARCHY, OFFICES & TEAMS
+    // 6. INFRASTRUCTURE, ORGANIZATIONAL HIERARCHY, OFFICES & TEAMS
     // =========================================================================
     match /campuses/{id} {
       allow read: if isSignedIn();
@@ -298,7 +501,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 6. ACADEMIC STRUCTURE, CLASSES, COURSE REGISTRATION & ADVISING
+    // 7. ACADEMIC STRUCTURE, CLASSES, COURSE REGISTRATION & ADVISING
     // =========================================================================
     match /academicYears/{id} {
       allow read: if isSignedIn();
@@ -327,7 +530,7 @@ service cloud.firestore {
     match /classes/{id} {
       allow read: if isSignedIn();
       allow create, delete: if isAcademicLeader() || isRegistrarOrAdmissions();
-      allow update: if isAcademicLeader() || isRegistrarOrAdmissions() || (
+      allow update: if isAcademicLeader() || isRegistrarOrAdmissions() || isFaculty() || (
         isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['students'])
       );
     }
@@ -374,15 +577,16 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 7. ADMISSIONS PIPELINE
+    // 8. ADMISSIONS PIPELINE
     // =========================================================================
     match /admissions/{id} {
       allow read: if isRegistrarOrAdmissions() || isAdmin() || isAcademicLeader();
-      allow write: if isRegistrarOrAdmissions() || isAdmin();
+      allow create, update: if (isRegistrarOrAdmissions() || isAdmin()) && isValidAdmission(request.resource.data);
+      allow delete: if isRegistrarOrAdmissions() || isAdmin();
     }
 
     // =========================================================================
-    // 8. TIMETABLE & ATTENDANCE
+    // 9. TIMETABLE & ATTENDANCE
     // =========================================================================
     match /timetable/{id} {
       allow read: if isSignedIn();
@@ -407,7 +611,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 9. LMS, ASSIGNMENTS, QUESTION BANK & QUIZZES
+    // 10. LMS, ASSIGNMENTS, QUESTION BANK & QUIZZES
     // =========================================================================
     match /lmsModules/{id} {
       allow read: if isSignedIn();
@@ -456,7 +660,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 10. EXAMINATIONS, RESULTS & REVALUATIONS
+    // 11. EXAMINATIONS, RESULTS & REVALUATIONS
     // =========================================================================
     match /exams/{id} {
       allow read: if isSignedIn();
@@ -481,7 +685,8 @@ service cloud.firestore {
           isParentOf(resource.data.studentId)
         ))
       );
-      allow write: if isExamStaff() || isFaculty();
+      allow create, update: if (isExamStaff() || isFaculty()) && isValidExamMark(request.resource.data);
+      allow delete: if isExamStaff() || isFaculty();
     }
     match /revaluationRequests/{id} {
       allow read: if isSignedIn() && (isExamStaff() || resource.data.studentId == request.auth.uid);
@@ -491,15 +696,17 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 11. FINANCE, FEES, PAYMENTS & SCHOLARSHIPS
+    // 12. FINANCE, FEES, PAYMENTS & SCHOLARSHIPS
     // =========================================================================
     match /feeStructures/{id} {
       allow read: if isSignedIn();
-      allow write: if isFinance();
+      allow create, update: if isFinance() && isValidFeeStructure(request.resource.data);
+      allow delete: if isFinance();
     }
     match /scholarships/{id} {
       allow read: if isSignedIn();
-      allow write: if isFinance();
+      allow create, update: if isFinance() && isValidScholarship(request.resource.data);
+      allow delete: if isFinance();
     }
     match /scholarshipApplications/{id} {
       allow read: if isFinance() || resource.data.studentId == request.auth.uid;
@@ -510,10 +717,11 @@ service cloud.firestore {
       allow read: if isFinance() ||
         resource.data.studentId == request.auth.uid ||
         isParentOf(resource.data.studentId);
-      allow create: if isFinance() || isRegistrarOrAdmissions() || isHostelStaff();
+      allow create: if (isFinance() || isRegistrarOrAdmissions() || isHostelStaff()) && isValidInvoice(request.resource.data);
       allow delete: if isFinance();
-      allow update: if isFinance() || (
+      allow update: if (isFinance() && isValidInvoice(request.resource.data)) || (
         isSignedIn() &&
+        isValidInvoice(request.resource.data) &&
         resource.data.studentId == request.auth.uid &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paidAmount', 'status']) &&
         request.resource.data.paidAmount >= resource.data.paidAmount &&
@@ -524,12 +732,13 @@ service cloud.firestore {
       allow read: if isFinance() ||
         resource.data.studentId == request.auth.uid ||
         isParentOf(resource.data.studentId);
-      allow create: if isFinance() || (isSignedIn() && request.resource.data.studentId == request.auth.uid);
-      allow update, delete: if isFinance();
+      allow create: if (isFinance() || (isSignedIn() && request.resource.data.studentId == request.auth.uid)) && isValidPayment(request.resource.data);
+      allow update: if isFinance() && isValidPayment(request.resource.data);
+      allow delete: if isFinance();
     }
 
     // =========================================================================
-    // 12. FACULTY, HR, RECRUITMENT, LEAVE & PAYROLL
+    // 13. FACULTY, HR, RECRUITMENT, LEAVE & PAYROLL
     // =========================================================================
     match /employmentContracts/{id} {
       allow read: if isHR() || resource.data.employeeId == request.auth.uid;
@@ -558,11 +767,12 @@ service cloud.firestore {
     }
     match /payrollRecords/{id} {
       allow read: if isPayrollAuthorized() || resource.data.staffId == request.auth.uid;
-      allow write: if isPayrollAuthorized();
+      allow create, update: if isPayrollAuthorized() && isValidPayrollRecord(request.resource.data);
+      allow delete: if isPayrollAuthorized();
     }
 
     // =========================================================================
-    // 13. CAMPUS SERVICES: LIBRARY, HOSTEL, TRANSPORT, EVENTS, CLUBS, PLACEMENT
+    // 14. CAMPUS SERVICES: LIBRARY, HOSTEL, TRANSPORT, EVENTS, CLUBS, PLACEMENT
     // =========================================================================
     match /libraryBooks/{id} {
       allow read: if isSignedIn();
@@ -649,7 +859,7 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // 14. GOVERNANCE: CERTIFICATES, SUPPORT, DISCIPLINE, NOTICES, AUDIT LOGS
+    // 15. GOVERNANCE: CERTIFICATES, SUPPORT, DISCIPLINE, NOTICES, AUDIT & LOGIN LOGS
     // =========================================================================
     match /certificateRequests/{id} {
       allow read: if isSignedIn() && (isCertificateStaff() || resource.data.studentId == request.auth.uid);
@@ -683,14 +893,21 @@ service cloud.firestore {
       );
       allow delete: if isAdmin();
     }
+
     match /auditLogs/{id} {
       allow read: if isAdmin() || hasAnyRole(['it_administrator', 'university_registrar', 'finance_director']);
-      allow create: if isSignedIn();
+      allow create: if isSignedIn() && isValidAuditLog(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    match /loginEvents/{id} {
+      allow read: if isAdmin() || hasAnyRole(['it_administrator']);
+      allow create: if isValidLoginEvent(request.resource.data);
       allow update, delete: if false;
     }
 
     // =========================================================================
-    // 15. DEFAULT DENY CATCH-ALL
+    // 16. DEFAULT DENY CATCH-ALL
     // =========================================================================
     match /{document=**} {
       allow read, write: if false;

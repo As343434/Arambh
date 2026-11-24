@@ -3,6 +3,7 @@ import Papa from 'papaparse';
 import { FirebaseBatchService } from '../services/FirebaseBatchService';
 import { Upload, FileText, CheckCircle2, AlertCircle, Loader2, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { generateCompliantTempPassword, sanitizeText } from '../utils/validation';
 
 interface BulkUploadProps {
   onComplete?: () => void;
@@ -36,13 +37,14 @@ export const BulkUpload: React.FC<BulkUploadProps> = ({ onComplete }) => {
         const errors: string[] = [];
 
         for (const row of rows) {
-          // Mapping and validation
-          const name = row.name || 'Unknown';
-          const role = (row.role || 'student').toLowerCase();
-          const rollNo = row.rollNo || '';
-          const email = row.email || (role === 'student' ? `roll${rollNo}@arambh.com` : `user${Math.random().toString(36).substring(7)}@arambh.com`);
-          const password = row.password || 'arambh123';
-          
+          const name = sanitizeText(row.name || 'Unknown');
+          const role = sanitizeText((row.role || 'student').toLowerCase());
+          const rollNo = sanitizeText(row.rollNo || '');
+          const email = (row.email || (role === 'student' ? `roll${rollNo}@arambh.edu` : `user${Math.random().toString(36).substring(2, 8)}@arambh.edu`)).trim();
+          const password = row.password && String(row.password).length >= 8
+            ? String(row.password)
+            : generateCompliantTempPassword();
+
           const userData = {
             email,
             password,
@@ -50,9 +52,9 @@ export const BulkUpload: React.FC<BulkUploadProps> = ({ onComplete }) => {
             role,
             assignedClass: row.class,
             assignedSection: row.section,
-            subjects: row.subjects ? row.subjects.split(',').map((s: string) => s.trim()) : [],
+            subjects: row.subjects ? row.subjects.split(',').map((s: string) => sanitizeText(s)) : [],
             rollNo: role === 'student' ? rollNo : undefined,
-            employeeId: role === 'teacher' ? (row.employeeId || `T-${Math.floor(Math.random() * 1000)}`) : undefined
+            employeeId: role === 'teacher' ? sanitizeText(row.employeeId || `T-${Math.floor(100 + Math.random() * 900)}`) : undefined
           };
 
           const result = await FirebaseBatchService.createUser(userData);
@@ -72,7 +74,7 @@ export const BulkUpload: React.FC<BulkUploadProps> = ({ onComplete }) => {
       error: (error) => {
         console.error('CSV Parsing Error:', error);
         setUploading(false);
-        alert('Failed to parse CSV file.');
+        setResults({ success: 0, failed: 1, errors: ['Failed to parse CSV file. Verify UTF-8 formatting.'] });
       }
     });
   };

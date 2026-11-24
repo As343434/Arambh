@@ -6,7 +6,8 @@ import { db, getSecondaryAuth } from '../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
 import { useUniversity } from '../../contexts/UniversityContext';
 import { ALL_PERMISSIONS, DEFAULT_ROLE_PERMISSIONS, ROLE_METADATA } from '../../config/rbac';
-import { logAudit } from '../../services/erpService';
+import { logAudit, syncPublicProfile } from '../../services/erpService';
+import { generateCompliantTempPassword, sanitizeText } from '../../utils/validation';
 import { PageHeader } from '../../components/ui/DataUI';
 import {
   CheckCircle2,
@@ -143,21 +144,25 @@ export const SetupWizard: React.FC = () => {
     setSaving(true);
     try {
       const targetRole = roleType === 'student' ? 'student' : (userForm.role || 'teacher');
-      const finalEmail = userForm.email || `${roleType === 'student' ? 'stu' : 'emp'}${userForm.idCode}@arambh.edu`;
+      const finalEmail = (userForm.email || `${roleType === 'student' ? 'stu' : 'emp'}${userForm.idCode}@arambh.edu`).trim();
+      const tempPassword = generateCompliantTempPassword();
       const secondaryAuth = getSecondaryAuth();
-      const cred = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, 'arambh123');
-      await setDoc(doc(db, 'users', cred.user.uid), {
+      const cred = await createUserWithEmailAndPassword(secondaryAuth, finalEmail, tempPassword);
+      const cleanName = sanitizeText(userForm.name);
+      const payload: Record<string, any> = {
         uid: cred.user.uid,
-        name: userForm.name,
+        name: cleanName,
         email: finalEmail,
         role: targetRole,
         status: 'active',
         departmentId: userForm.departmentId || '',
         classId: userForm.classId || '',
-        [roleType === 'student' ? 'rollNo' : 'employeeId']: userForm.idCode,
+        [roleType === 'student' ? 'rollNo' : 'employeeId']: sanitizeText(userForm.idCode),
         isFirstLogin: true,
         createdAt: serverTimestamp()
-      });
+      };
+      await setDoc(doc(db, 'users', cred.user.uid), payload);
+      await syncPublicProfile(cred.user.uid, payload);
       if (roleType === 'student' && userForm.classId) {
         const cls = classes.find(c => c.id === userForm.classId);
         if (cls) {
@@ -168,11 +173,12 @@ export const SetupWizard: React.FC = () => {
       }
       await secondaryAuth.signOut();
       await markStepCompleted(roleType === 'student' ? 13 : 12);
-      await logAudit(profile, 'ONBOARD_USER', 'SetupWizard', cred.user.uid, `Onboarded ${targetRole}: ${userForm.name}`);
+      await logAudit(profile, 'ONBOARD_USER', 'SetupWizard', cred.user.uid, `Onboarded ${targetRole}: ${cleanName}`);
       setUserForm({ name: '', email: '', idCode: '', role: 'teacher', departmentId: '', classId: '' });
-      notify('success', `Provisioned ${userForm.name} (${finalEmail}, default password: arambh123).`);
+      notify('success', `Provisioned ${cleanName} (${finalEmail}, temporary password: ${tempPassword}).`);
     } catch (e: any) {
-      notify('error', e.message || 'Failed to provision user');
+      console.error('SetupWizard provision error:', e);
+      notify('error', 'Failed to provision user account.');
     } finally {
       setSaving(false);
     }

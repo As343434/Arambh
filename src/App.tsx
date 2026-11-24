@@ -11,6 +11,7 @@ import { AuthProvider } from './contexts/AuthContext';
 import { UniversityProvider } from './contexts/UniversityContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Layout } from './components/Layout';
+import { SessionTimeoutGuard } from './components/SessionTimeoutGuard';
 import { Welcome } from './pages/Welcome';
 import { Login } from './pages/Login';
 import { ChangePassword } from './pages/ChangePassword';
@@ -79,6 +80,7 @@ export default function App() {
         <AuthProvider>
           <UniversityProvider>
             <Router>
+              <SessionTimeoutGuard />
               <Routes>
                 <Route path="/" element={<Welcome />} />
                 <Route path="/login" element={<Login />} />

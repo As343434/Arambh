@@ -67,7 +67,9 @@
     "CertificateRequest": { "description": "Official bonafide, transcript, and degree certificate requests" },
     "DirectMessage": { "description": "Direct institutional messages between users" },
     "Notice": { "description": "Targeted circulars and announcements" },
-    "AuditLog": { "description": "Immutable institutional security and action audit trail" }
+    "AuditLog": { "description": "Immutable institutional security and action audit trail" },
+    "PublicProfile": { "description": "Non-sensitive institutional directory attributes (name, role, department, office, designation, photoUrl)" },
+    "LoginEvent": { "description": "Immutable authentication attempt security log (masked email, hash, outcome, server timestamp)" }
   },
   "collections": {
     "university_config": { "schema": "UniversityProfile" },
@@ -145,6 +147,8 @@
     "hostelRequests": { "schema": "HostelRequest" },
     "transportRequests": { "schema": "TransportRequest" },
     "studentClubs": { "schema": "StudentClub" },
-    "examRegistrations": { "schema": "ExamRegistration" }
+    "examRegistrations": { "schema": "ExamRegistration" },
+    "publicProfiles": { "schema": "PublicProfile" },
+    "loginEvents": { "schema": "LoginEvent" }
   }
 }
