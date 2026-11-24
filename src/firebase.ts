@@ -7,18 +7,14 @@ import {
 import { getAnalytics } from 'firebase/analytics';
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
+  apiKey: "AIzaSyBKhquJnNGiGKWXrIwgDjlbmHLVekOOhHk",
+  authDomain: "arambh-c1654.firebaseapp.com",
+  projectId: "arambh-c1654",
+  storageBucket: "arambh-c1654.firebasestorage.app",
+  messagingSenderId: "1089324429935",
+  appId: "1:1089324429935:web:27fec6c1c2af676ae9939a",
+  measurementId: "G-ELM77B48MQ"
 };
-
-if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
-  console.error('Firebase environment configuration is missing. Verify VITE_FIREBASE_* variables in .env.');
-}
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
