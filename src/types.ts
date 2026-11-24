@@ -341,6 +341,7 @@ export type ApprovalProcessType =
   | 'result_approval'
   | 'result_publication'
   | 'fee_refund'
+  | 'fee_payment_verification'
   | 'scholarship_approval'
   | 'admission_approval'
   | 'timetable_change'
@@ -840,10 +841,12 @@ export interface QuizAttempt {
   answers: number[];
   multiAnswers?: Record<string, number[]>;
   textAnswers?: string[];
-  score: number;
-  totalMarks: number;
-  percentage: number;
+  score?: number;
+  totalMarks?: number;
+  percentage?: number;
   needsManualGrading?: boolean;
+  status?: 'pending' | 'graded';
+  gradedBy?: string;
   submittedAt?: any;
 }
 

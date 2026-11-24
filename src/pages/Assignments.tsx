@@ -6,6 +6,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useUniversity } from '../contexts/UniversityContext';
 import { EmptyState, Modal, PageHeader, SegmentedTabs, StatCard, StatusText } from '../components/ui/DataUI';
 import { calculateGrade, logAudit } from '../services/erpService';
+import { sanitizeText, validateSafeUrl } from '../utils/validation';
 import { Assignment, Submission } from '../types';
 
 export const Assignments: React.FC = () => {
@@ -143,16 +144,18 @@ export const Assignments: React.FC = () => {
   };
 
   const saveStudentSubmission = async (asDraft: boolean) => {
-    if (!profile || !submitTarget || !subContent.trim()) return;
+    if (!profile || !submitTarget) return;
+    const cleanContent = sanitizeText(subContent);
+    if (!cleanContent) return;
     setSubmitting(true);
     try {
-      const cleanLinks = subLinks.map(l => l.trim()).filter(Boolean);
+      const cleanLinks = subLinks.map(l => l.trim()).filter(l => l && validateSafeUrl(l) === null);
       const isLate = !asDraft && submitTarget.dueDate && String(submitTarget.dueDate) < todayStr;
       const status: Submission['status'] = asDraft ? 'draft' : isLate ? 'late' : 'submitted';
 
       if (editingSub) {
         await updateDoc(doc(db, 'submissions', editingSub.id), {
-          content: subContent,
+          content: cleanContent,
           attachmentUrl: cleanLinks[0] || null,
           attachments: cleanLinks,
           isDraft: asDraft,
@@ -168,7 +171,7 @@ export const Assignments: React.FC = () => {
           classId: submitTarget.classId,
           studentId: profile.uid,
           studentName: profile.name,
-          content: subContent,
+          content: cleanContent,
           attachmentUrl: cleanLinks[0] || null,
           attachments: cleanLinks,
           isDraft: asDraft,

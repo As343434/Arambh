@@ -27,6 +27,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { useUniversity } from '../contexts/UniversityContext';
 import { EmptyState, Modal, PageHeader, SegmentedTabs, StatCard, StatusText } from '../components/ui/DataUI';
 import { exportToCsv, logAudit } from '../services/erpService';
+import { sanitizeText, validateAmount, validateFreeText } from '../utils/validation';
 import { ApprovalRequest, FeeStructure, Invoice, Payment, Scholarship, ScholarshipApplication } from '../types';
 
 export const Finance: React.FC = () => {
@@ -67,11 +68,17 @@ export const Finance: React.FC = () => {
   const [invBaseAmount, setInvBaseAmount] = useState(50000);
   const [invDueDate, setInvDueDate] = useState('');
 
-  // Payment Modal
+  // Payment Modal (Finance Staff) & Payment Verification Request Modal (Student/Parent)
   const [payInvoice, setPayInvoice] = useState<Invoice | null>(null);
   const [payAmount, setPayAmount] = useState(0);
   const [payMethod, setPayMethod] = useState<Payment['method']>('upi');
   const [payRef, setPayRef] = useState('');
+
+  const [proofInvoice, setProofInvoice] = useState<Invoice | null>(null);
+  const [proofAmount, setProofAmount] = useState(0);
+  const [proofMethod, setProofMethod] = useState<Payment['method']>('upi');
+  const [proofRef, setProofRef] = useState('');
+  const [proofError, setProofError] = useState<string | null>(null);
 
   // Refund Modals (Staff direct refund & Student request)
   const [refundModalPay, setRefundModalPay] = useState<Payment | null>(null);
@@ -134,7 +141,7 @@ export const Finance: React.FC = () => {
         setRefundApprovals(
           s.docs
             .map(d => ({ id: d.id, ...d.data() } as ApprovalRequest))
-            .filter(a => a.processType === 'fee_refund')
+            .filter(a => a.processType === 'fee_refund' || a.processType === 'fee_payment_verification')
         );
       },
       () => {}
@@ -230,7 +237,7 @@ export const Finance: React.FC = () => {
 
   const handleRecordPayment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!payInvoice || payAmount <= 0) return;
+    if (!canManageFinance || !payInvoice || payAmount <= 0) return;
     const remaining = Math.max(0, payInvoice.totalAmount - (payInvoice.paidAmount || 0));
     const appliedAmount = Math.min(Number(payAmount), remaining);
     if (appliedAmount <= 0) return;
@@ -247,7 +254,7 @@ export const Finance: React.FC = () => {
       studentName: payInvoice.studentName,
       amount: appliedAmount,
       method: payMethod,
-      transactionRef: payRef || `TXN-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
+      transactionRef: sanitizeText(payRef) || `TXN-${Math.random().toString(36).slice(2, 8).toUpperCase()}`,
       status: 'completed',
       collectedBy: profile?.name || profile?.uid,
       paidAt: serverTimestamp()
@@ -261,6 +268,57 @@ export const Finance: React.FC = () => {
     setPayInvoice(null);
     setPayRef('');
     setBanner(`Payment receipt ${receiptNo} recorded.`);
+  };
+
+  const handleSubmitPaymentProof = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProofError(null);
+    if (!proofInvoice || !profile) return;
+    const remaining = Math.max(0, proofInvoice.totalAmount - (proofInvoice.paidAmount || 0));
+    const amtErr = validateAmount(proofAmount, { min: 1, max: Math.max(1, remaining), label: 'Payment amount' });
+    if (amtErr) {
+      setProofError(amtErr);
+      return;
+    }
+    const refErr = validateFreeText(proofRef, { required: true, minLen: 4, maxLen: 80, label: 'Transaction Reference / UTR' });
+    if (refErr) {
+      setProofError(refErr);
+      return;
+    }
+
+    const cleanRef = sanitizeText(proofRef);
+    const reqRef = await addDoc(collection(db, 'approvalRequests'), {
+      processType: 'fee_payment_verification',
+      title: `Fee Payment Verification: ${proofInvoice.invoiceNo}`,
+      description: `Student submitted ${proofMethod.replace('_', ' ').toUpperCase()} reference ${cleanRef} for ${currency} ${Number(proofAmount).toLocaleString()} against ${proofInvoice.title}.`,
+      requesterId: profile.uid,
+      requesterName: profile.name,
+      requesterRole: profile.role,
+      targetEntityId: proofInvoice.id,
+      targetCollection: 'invoices',
+      amount: Number(proofAmount),
+      currentStageIndex: 0,
+      stages: [
+        { stageOrder: 1, stageName: 'Fee Officer / Accountant Verification', approverRole: 'fee_officer' }
+      ],
+      status: 'pending',
+      history: [
+        {
+          stageName: 'Submitted',
+          actorId: profile.uid,
+          actorName: profile.name,
+          actorRole: profile.role,
+          action: 'submitted',
+          comment: `${proofMethod.toUpperCase()} Ref: ${cleanRef}`,
+          timestamp: new Date().toISOString()
+        }
+      ],
+      createdAt: serverTimestamp()
+    });
+    await logAudit(profile, 'SUBMIT_PAYMENT_PROOF', 'Finance', reqRef.id, `${proofInvoice.invoiceNo} · ${cleanRef} (${currency} ${proofAmount})`);
+    setProofInvoice(null);
+    setProofRef('');
+    setBanner(`Payment reference ${cleanRef} submitted for Finance Office verification.`);
   };
 
   const handleRefundPayment = async (e: React.FormEvent) => {
@@ -478,13 +536,22 @@ export const Finance: React.FC = () => {
                       <td className="py-3 px-4 font-mono text-xs">{inv.dueDate}</td>
                       <td className="py-3 px-4"><StatusText status={inv.status} /></td>
                       <td className="py-3 px-4 text-right">
-                        {balance > 0 && (canManageFinance || isStudent || isParent) && (
+                        {balance > 0 && canManageFinance && (
                           <button
                             type="button"
                             onClick={() => { setPayInvoice(inv); setPayAmount(balance); }}
                             className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#111111] dark:bg-white dark:text-zinc-950 text-white hover:bg-[#27272A] dark:hover:bg-zinc-200"
                           >
-                            <CreditCard className="w-3.5 h-3.5" /> {canManageFinance ? 'Record Payment' : 'Pay Now'}
+                            <CreditCard className="w-3.5 h-3.5" /> Record Payment
+                          </button>
+                        )}
+                        {balance > 0 && !canManageFinance && (isStudent || isParent) && (
+                          <button
+                            type="button"
+                            onClick={() => { setProofInvoice(inv); setProofAmount(balance); setProofError(null); }}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 hover:bg-zinc-50 dark:hover:bg-zinc-800 text-[#111111] dark:text-zinc-100"
+                          >
+                            <CreditCard className="w-3.5 h-3.5" /> Submit Payment Proof
                           </button>
                         )}
                       </td>
@@ -551,7 +618,7 @@ export const Finance: React.FC = () => {
 
           {refundApprovals.filter(a => !targetStudentUid || a.requesterId === targetStudentUid).length > 0 && (
             <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)] p-5">
-              <h3 className="text-sm font-semibold mb-3">Fee Refund Requests</h3>
+              <h3 className="text-sm font-semibold mb-3">Payment Verification &amp; Refund Requests</h3>
               <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
                 {refundApprovals
                   .filter(a => !targetStudentUid || a.requesterId === targetStudentUid)
@@ -800,6 +867,71 @@ export const Finance: React.FC = () => {
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setPayInvoice(null)} className="px-4 py-2 text-xs rounded-lg border border-zinc-200 dark:border-zinc-700">Cancel</button>
                 <button type="submit" className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#111111] dark:bg-white dark:text-zinc-950 text-white">Confirm Payment</button>
+              </div>
+            </form>
+          );
+        })()}
+      </Modal>
+
+      {/* Student / Parent Payment Verification Proof Modal */}
+      <Modal
+        open={!!proofInvoice}
+        onClose={() => setProofInvoice(null)}
+        title={`Submit Payment Proof — ${proofInvoice?.invoiceNo || ''}`}
+        subtitle="Transaction references are verified by the Finance & Accounts Office before updating your ledger."
+      >
+        {proofInvoice && (() => {
+          const remaining = Math.max(0, proofInvoice.totalAmount - (proofInvoice.paidAmount || 0));
+          return (
+            <form onSubmit={handleSubmitPaymentProof} className="space-y-4">
+              {proofError && (
+                <div className="px-3 py-2 rounded-lg border border-rose-200 bg-rose-50 text-xs text-rose-700">
+                  {proofError}
+                </div>
+              )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium mb-1">Amount Paid ({currency})</label>
+                  <input
+                    type="number"
+                    required
+                    min={1}
+                    max={remaining}
+                    value={proofAmount}
+                    onChange={e => setProofAmount(Number(e.target.value))}
+                    className="w-full px-3 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium mb-1">Payment Method</label>
+                  <select
+                    value={proofMethod}
+                    onChange={e => setProofMethod(e.target.value as any)}
+                    className="w-full px-3 py-2 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+                  >
+                    <option value="upi">UPI</option>
+                    <option value="card">Debit / Credit Card</option>
+                    <option value="bank_transfer">Bank Transfer / NEFT</option>
+                    <option value="cash">Cash Counter</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium mb-1">UTR / Transaction Reference Number</label>
+                <input
+                  type="text"
+                  required
+                  minLength={4}
+                  maxLength={80}
+                  value={proofRef}
+                  onChange={e => setProofRef(e.target.value)}
+                  placeholder="Enter bank / UPI reference number"
+                  className="w-full px-3 py-2 text-sm font-mono bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setProofInvoice(null)} className="px-4 py-2 text-xs rounded-lg border border-zinc-200 dark:border-zinc-700">Cancel</button>
+                <button type="submit" className="px-4 py-2 text-xs font-semibold rounded-lg bg-[#111111] dark:bg-white dark:text-zinc-950 text-white">Submit for Verification</button>
               </div>
             </form>
           );

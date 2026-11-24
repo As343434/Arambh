@@ -4,7 +4,6 @@ import {
   initializeFirestore,
   memoryLocalCache
 } from 'firebase/firestore';
-import { getDatabase } from 'firebase/database';
 import { getAnalytics } from 'firebase/analytics';
 
 const firebaseConfig = {
@@ -23,10 +22,7 @@ if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const rtdb = getDatabase(app);
 export const analytics = typeof window !== 'undefined' && firebaseConfig.measurementId ? getAnalytics(app) : null;
-
-export const getRtdbPath = (path: string) => `arambh/${path}`;
 
 export const db = initializeFirestore(app, {
   localCache: memoryLocalCache(),

@@ -203,11 +203,111 @@ service cloud.firestore {
     }
 
     function isOptStr(data, field, maxLen) {
-      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+      return !(field in data) || data[field] == null || (data[field] is string && data[field].size() <= maxLen);
     }
 
     function isOptNum(data, field, minVal, maxVal) {
-      return !(field in data) || ((data[field] is int || data[field] is float) && data[field] >= minVal && data[field] <= maxVal);
+      return !(field in data) || data[field] == null || ((data[field] is int || data[field] is float) && data[field] >= minVal && data[field] <= maxVal);
+    }
+
+    function isSelfArrayToggle(oldData, newData, field) {
+      return newData.diff(oldData).affectedKeys().hasOnly([field]) &&
+        newData[field] is list && (
+          (!(field in oldData) && newData[field] == [request.auth.uid]) ||
+          (field in oldData && oldData[field] is list && (
+            (!(request.auth.uid in oldData[field]) &&
+              (request.auth.uid in newData[field]) &&
+              newData[field].size() == oldData[field].size() + 1 &&
+              newData[field].hasAll(oldData[field]) &&
+              oldData[field].concat([request.auth.uid]).hasAll(newData[field])) ||
+            ((request.auth.uid in oldData[field]) &&
+              !(request.auth.uid in newData[field]) &&
+              newData[field].size() == oldData[field].size() - 1 &&
+              oldData[field].hasAll(newData[field]) &&
+              newData[field].concat([request.auth.uid]).hasAll(oldData[field]))
+          ))
+        );
+    }
+
+    function isValidSubmissionCreate(data) {
+      return data.keys().hasOnly([
+          'assignmentId', 'assignmentTitle', 'classId', 'studentId', 'studentName',
+          'content', 'attachmentUrl', 'attachments', 'isDraft', 'resubmissionCount',
+          'submittedAt', 'status'
+        ]) &&
+        data.studentId == request.auth.uid &&
+        !('marks' in data) &&
+        !('grade' in data) &&
+        !('feedback' in data) &&
+        !('gradedBy' in data) &&
+        data.status in ['draft', 'submitted', 'late'] &&
+        isValidStr(data.assignmentId, 1, 128) &&
+        isValidStr(data.classId, 1, 128) &&
+        isValidStr(data.content, 1, 10000) &&
+        isOptStr(data, 'attachmentUrl', 1000);
+    }
+
+    function isValidSubmissionStudentUpdate(newData, oldData) {
+      return oldData.studentId == request.auth.uid &&
+        oldData.status != 'graded' &&
+        newData.diff(oldData).affectedKeys().hasOnly([
+          'content', 'attachmentUrl', 'attachments', 'isDraft',
+          'resubmissionCount', 'status', 'submittedAt'
+        ]) &&
+        newData.status in ['draft', 'submitted', 'late'] &&
+        !('marks' in newData) &&
+        !('grade' in newData) &&
+        !('feedback' in newData) &&
+        !('gradedBy' in newData) &&
+        isValidStr(newData.content, 1, 10000) &&
+        isOptStr(newData, 'attachmentUrl', 1000);
+    }
+
+    function isValidQuizAttemptCreate(data) {
+      return data.keys().hasOnly([
+          'quizId', 'quizTitle', 'studentId', 'studentName',
+          'answers', 'multiAnswers', 'textAnswers', 'status', 'submittedAt'
+        ]) &&
+        data.studentId == request.auth.uid &&
+        data.status == 'pending' &&
+        !('score' in data) &&
+        !('percentage' in data) &&
+        !('totalMarks' in data) &&
+        !('gradedBy' in data) &&
+        isValidStr(data.quizId, 1, 128) &&
+        isOptStr(data, 'quizTitle', 200) &&
+        isOptStr(data, 'studentName', 100);
+    }
+
+    function isValidAttendanceCorrectionCreate(data) {
+      return data.keys().hasOnly([
+          'attendanceId', 'studentId', 'studentName', 'classId', 'className',
+          'subjectId', 'subjectName', 'date', 'currentStatus', 'requestedStatus',
+          'reason', 'status', 'createdAt'
+        ]) &&
+        data.studentId == request.auth.uid &&
+        data.status == 'pending' &&
+        !('reviewedBy' in data) &&
+        isValidStr(data.date, 4, 30) &&
+        isValidStr(data.reason, 2, 1000);
+    }
+
+    function isValidCourseRegistrationCreate(data) {
+      return data.keys().hasOnly([
+          'studentId', 'studentName', 'rollNo', 'semesterId', 'semesterNumber',
+          'subjectId', 'subjectCode', 'subjectName', 'classId', 'className',
+          'credits', 'courseType', 'status', 'createdAt'
+        ]) &&
+        data.studentId == request.auth.uid &&
+        (!('registrationHold' in getUserData()) || getUserData().registrationHold != true) &&
+        isValidStr(data.subjectId, 1, 128) &&
+        isValidStr(data.subjectCode, 1, 40) &&
+        isValidStr(data.subjectName, 1, 150) &&
+        data.status in ['pending', 'pending_approval', 'waitlisted', 'registered'] &&
+        (!exists(/databases/$(database)/documents/system_settings/main) ||
+          !('registrationConfig' in get(/databases/$(database)/documents/system_settings/main).data) ||
+          get(/databases/$(database)/documents/system_settings/main).data.registrationConfig.requireAdvisorApproval != true ||
+          data.status in ['pending', 'pending_approval', 'waitlisted']);
     }
 
     function isValidUserCreate(data, userId) {
@@ -397,6 +497,7 @@ service cloud.firestore {
       );
       allow create: if isSignedIn() &&
         request.resource.data.requesterId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
         isValidStr(request.resource.data.title, 2, 160);
       allow update: if isSignedIn() && isApprover();
       allow delete: if isAdmin();
@@ -531,7 +632,7 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow create, delete: if isAcademicLeader() || isRegistrarOrAdmissions();
       allow update: if isAcademicLeader() || isRegistrarOrAdmissions() || isFaculty() || (
-        isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['students'])
+        isSignedIn() && isSelfArrayToggle(resource.data, request.resource.data, 'students')
       );
     }
     match /academicEvents/{id} {
@@ -550,12 +651,15 @@ service cloud.firestore {
       allow create: if isSignedIn() && (
         isAcademicLeader() ||
         isRegistrarOrAdmissions() ||
-        request.resource.data.studentId == request.auth.uid
+        isValidCourseRegistrationCreate(request.resource.data)
       );
       allow update: if isSignedIn() && (
         isAcademicLeader() ||
         isRegistrarOrAdmissions() ||
-        resource.data.studentId == request.auth.uid
+        isFaculty() ||
+        (resource.data.studentId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+          request.resource.data.status == 'dropped')
       );
       allow delete: if isAcademicLeader() || isRegistrarOrAdmissions() || resource.data.studentId == request.auth.uid;
     }
@@ -605,7 +709,7 @@ service cloud.firestore {
 
     match /attendanceCorrections/{id} {
       allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
-      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow create: if isSignedIn() && isValidAttendanceCorrectionCreate(request.resource.data);
       allow update: if isFaculty();
       allow delete: if isAdmin();
     }
@@ -627,8 +731,25 @@ service cloud.firestore {
     }
     match /lmsDiscussions/{id} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn();
-      allow update: if isSignedIn();
+      allow create: if isSignedIn() &&
+        request.resource.data.authorId == request.auth.uid &&
+        isValidStr(request.resource.data.title, 1, 200) &&
+        isValidStr(request.resource.data.content, 1, 5000) &&
+        (!('replies' in request.resource.data) || (request.resource.data.replies is list && request.resource.data.replies.size() == 0));
+      allow update: if isSignedIn() && (
+        isFaculty() ||
+        (resource.data.authorId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'content']) &&
+          isValidStr(request.resource.data.title, 1, 200) &&
+          isValidStr(request.resource.data.content, 1, 5000)) ||
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['replies']) &&
+          resource.data.replies is list &&
+          request.resource.data.replies is list &&
+          request.resource.data.replies.size() == resource.data.replies.size() + 1 &&
+          request.resource.data.replies.hasAll(resource.data.replies) &&
+          request.resource.data.replies[resource.data.replies.size()].authorId == request.auth.uid &&
+          isValidStr(request.resource.data.replies[resource.data.replies.size()].content, 1, 2000))
+      );
       allow delete: if isSignedIn() && (isFaculty() || resource.data.authorId == request.auth.uid);
     }
     match /assignments/{id} {
@@ -637,12 +758,10 @@ service cloud.firestore {
     }
     match /submissions/{id} {
       allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
-      allow create: if isSignedIn() && (isFaculty() || request.resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && (isFaculty() || isValidSubmissionCreate(request.resource.data));
       allow update: if isSignedIn() && (
         isFaculty() ||
-        (resource.data.studentId == request.auth.uid &&
-          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['marks', 'grade', 'feedback', 'gradedBy'])
-        )
+        isValidSubmissionStudentUpdate(request.resource.data, resource.data)
       );
       allow delete: if isFaculty();
     }
@@ -655,7 +774,7 @@ service cloud.firestore {
     }
     match /quizAttempts/{id} {
       allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
-      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow create: if isSignedIn() && (isFaculty() || isValidQuizAttemptCreate(request.resource.data));
       allow update, delete: if isFaculty();
     }
 
@@ -690,7 +809,11 @@ service cloud.firestore {
     }
     match /revaluationRequests/{id} {
       allow read: if isSignedIn() && (isExamStaff() || resource.data.studentId == request.auth.uid);
-      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        request.resource.data.studentId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        !('updatedMarks' in request.resource.data) &&
+        !('reviewedBy' in request.resource.data);
       allow update: if isExamStaff();
       allow delete: if isAdmin();
     }
@@ -710,7 +833,12 @@ service cloud.firestore {
     }
     match /scholarshipApplications/{id} {
       allow read: if isFinance() || resource.data.studentId == request.auth.uid;
-      allow create: if isSignedIn() && (isFinance() || request.resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && (
+        isFinance() ||
+        (request.resource.data.studentId == request.auth.uid &&
+          request.resource.data.status == 'pending' &&
+          !('reviewedBy' in request.resource.data))
+      );
       allow update, delete: if isFinance();
     }
     match /invoices/{id} {
@@ -718,21 +846,14 @@ service cloud.firestore {
         resource.data.studentId == request.auth.uid ||
         isParentOf(resource.data.studentId);
       allow create: if (isFinance() || isRegistrarOrAdmissions() || isHostelStaff()) && isValidInvoice(request.resource.data);
+      allow update: if isFinance() && isValidInvoice(request.resource.data);
       allow delete: if isFinance();
-      allow update: if (isFinance() && isValidInvoice(request.resource.data)) || (
-        isSignedIn() &&
-        isValidInvoice(request.resource.data) &&
-        resource.data.studentId == request.auth.uid &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paidAmount', 'status']) &&
-        request.resource.data.paidAmount >= resource.data.paidAmount &&
-        request.resource.data.paidAmount <= resource.data.totalAmount
-      );
     }
     match /payments/{id} {
       allow read: if isFinance() ||
         resource.data.studentId == request.auth.uid ||
         isParentOf(resource.data.studentId);
-      allow create: if (isFinance() || (isSignedIn() && request.resource.data.studentId == request.auth.uid)) && isValidPayment(request.resource.data);
+      allow create: if isFinance() && isValidPayment(request.resource.data);
       allow update: if isFinance() && isValidPayment(request.resource.data);
       allow delete: if isFinance();
     }
@@ -838,14 +959,14 @@ service cloud.firestore {
       allow create, delete: if isAdmin() || hasAnyRole(['student_affairs_officer', 'placement_officer', 'support_staff', 'hod']);
       allow update: if isAdmin() ||
         hasAnyRole(['student_affairs_officer', 'placement_officer', 'support_staff', 'hod']) ||
-        (isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['registeredUserIds']));
+        (isSignedIn() && isSelfArrayToggle(resource.data, request.resource.data, 'registeredUserIds'));
     }
     match /studentClubs/{id} {
       allow read: if isSignedIn();
       allow create, delete: if isAdmin() || hasAnyRole(['student_affairs_officer', 'support_staff', 'hod']);
       allow update: if isAdmin() ||
         hasAnyRole(['student_affairs_officer', 'support_staff', 'hod']) ||
-        (isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds']));
+        (isSignedIn() && isSelfArrayToggle(resource.data, request.resource.data, 'memberIds'));
     }
 
     match /placementDrives/{id} {
@@ -886,10 +1007,20 @@ service cloud.firestore {
         resource.data.recipientId == request.auth.uid ||
         isAdmin()
       );
-      allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+      allow create: if isSignedIn() &&
+        request.resource.data.senderId == request.auth.uid &&
+        isValidStr(request.resource.data.recipientId, 1, 128) &&
+        isValidStr(request.resource.data.subject, 1, 200) &&
+        isValidStr(request.resource.data.body, 1, 5000) &&
+        (!('read' in request.resource.data) || request.resource.data.read == false);
       allow update: if isSignedIn() && (
-        resource.data.senderId == request.auth.uid ||
-        resource.data.recipientId == request.auth.uid
+        (resource.data.recipientId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']) &&
+          request.resource.data.read is bool) ||
+        (resource.data.senderId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['subject', 'body']) &&
+          isValidStr(request.resource.data.subject, 1, 200) &&
+          isValidStr(request.resource.data.body, 1, 5000))
       );
       allow delete: if isAdmin();
     }

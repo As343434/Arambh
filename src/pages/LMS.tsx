@@ -111,6 +111,8 @@ export const LMS: React.FC = () => {
   const [secondsLeft, setSecondsLeft] = useState(0);
   const [quizNotice, setQuizNotice] = useState<string | null>(null);
   const [reviewData, setReviewData] = useState<{ quiz: Quiz; attempt: QuizAttempt } | null>(null);
+  const [gradingQuiz, setGradingQuiz] = useState<Quiz | null>(null);
+  const [attemptScoreDraft, setAttemptScoreDraft] = useState<Record<string, number>>({});
 
   // Discussion state
   const [discTitle, setDiscTitle] = useState('');
@@ -415,25 +417,23 @@ export const LMS: React.FC = () => {
     setSecondsLeft((quiz.durationMinutes || 15) * 60);
   };
 
-  const handleSubmitQuizAttempt = async () => {
-    if (!activeQuiz || !profile) return;
+  const computeAttemptObjectiveScore = (quiz: Quiz, attempt: Pick<QuizAttempt, 'answers' | 'multiAnswers' | 'textAnswers'>) => {
     let score = 0;
     let needsManualGrading = false;
-
-    activeQuiz.questions.forEach((q, idx) => {
+    (quiz.questions || []).forEach((q, idx) => {
       const qType = q.questionType || 'mcq';
       const pts = q.marks || 1;
       if (qType === 'mcq' || qType === 'true_false') {
-        if (quizAnswers[idx] === q.correctOptionIndex) score += pts;
+        if (attempt.answers?.[idx] === q.correctOptionIndex) score += pts;
       } else if (qType === 'multi_select') {
-        const chosen = [...(quizMultiAnswers[String(idx)] || [])].sort((a, b) => a - b);
+        const chosen = [...(attempt.multiAnswers?.[String(idx)] || [])].sort((a, b) => a - b);
         const expected = [...(q.correctOptionIndices || [])].sort((a, b) => a - b);
         if (expected.length > 0 && chosen.length === expected.length && chosen.every((v, i) => v === expected[i])) {
           score += pts;
         }
       } else if (qType === 'short_answer') {
         const expectedText = (q.correctTextAnswer || '').trim().toLowerCase();
-        const studentText = (quizTextAnswers[idx] || '').trim().toLowerCase();
+        const studentText = (attempt.textAnswers?.[idx] || '').trim().toLowerCase();
         if (!expectedText) {
           needsManualGrading = true;
         } else if (studentText === expectedText) {
@@ -441,8 +441,11 @@ export const LMS: React.FC = () => {
         }
       }
     });
+    return { score, needsManualGrading };
+  };
 
-    const pct = activeQuiz.totalMarks > 0 ? Math.round((score / activeQuiz.totalMarks) * 100) : 0;
+  const handleSubmitQuizAttempt = async () => {
+    if (!activeQuiz || !profile) return;
     await addDoc(collection(db, 'quizAttempts'), {
       quizId: activeQuiz.id,
       quizTitle: activeQuiz.title,
@@ -451,15 +454,29 @@ export const LMS: React.FC = () => {
       answers: quizAnswers,
       multiAnswers: quizMultiAnswers,
       textAnswers: quizTextAnswers,
-      score,
-      totalMarks: activeQuiz.totalMarks,
-      percentage: pct,
-      needsManualGrading,
+      status: 'pending',
       submittedAt: serverTimestamp()
     });
-    await logAudit(profile, 'SUBMIT_QUIZ', 'LMS', activeQuiz.id, `Scored ${score}/${activeQuiz.totalMarks} (${pct}%)`);
-    setQuizNotice(`Submitted "${activeQuiz.title}" — Score: ${score}/${activeQuiz.totalMarks} (${pct}%).`);
+    await logAudit(profile, 'SUBMIT_QUIZ', 'LMS', activeQuiz.id, `Submitted attempt for ${activeQuiz.title}`);
+    setQuizNotice(`Submitted "${activeQuiz.title}" for faculty grading and score verification.`);
     setActiveQuiz(null);
+  };
+
+  const handleGradeQuizAttempt = async (quiz: Quiz, attempt: QuizAttempt) => {
+    if (!canManage || !profile) return;
+    const { score: autoScore } = computeAttemptObjectiveScore(quiz, attempt);
+    const finalScore = Math.max(0, Math.min(quiz.totalMarks || 100, Number(attemptScoreDraft[attempt.id] ?? attempt.score ?? autoScore)));
+    const pct = quiz.totalMarks > 0 ? Math.round((finalScore / quiz.totalMarks) * 100) : 0;
+    await updateDoc(doc(db, 'quizAttempts', attempt.id), {
+      score: finalScore,
+      totalMarks: quiz.totalMarks,
+      percentage: pct,
+      needsManualGrading: false,
+      status: 'graded',
+      gradedBy: profile.name || profile.uid
+    });
+    await logAudit(profile, 'GRADE_QUIZ_ATTEMPT', 'LMS', attempt.id, `${attempt.studentName}: ${finalScore}/${quiz.totalMarks} (${pct}%)`);
+    setQuizNotice(`Graded ${attempt.studentName} on "${quiz.title}" — ${finalScore}/${quiz.totalMarks} (${pct}%).`);
   };
 
   const handleCreateDiscussion = async (e: React.FormEvent) => {
@@ -737,10 +754,20 @@ export const LMS: React.FC = () => {
                         <div className="flex flex-wrap items-center justify-between gap-2 w-full">
                           {latestAttempt ? (
                             <div className="flex items-center gap-2">
-                              <StatusText status={latestAttempt.needsManualGrading ? 'needs_grading' : 'completed'} />
-                              <span className="text-xs font-mono font-semibold text-[#111111] dark:text-zinc-200">
-                                {latestAttempt.score}/{latestAttempt.totalMarks} ({latestAttempt.percentage}%)
-                              </span>
+                              <StatusText
+                                status={
+                                  latestAttempt.status === 'graded' || typeof latestAttempt.score === 'number'
+                                    ? latestAttempt.needsManualGrading ? 'needs_grading' : 'graded'
+                                    : 'pending'
+                                }
+                              />
+                              {typeof latestAttempt.score === 'number' ? (
+                                <span className="text-xs font-mono font-semibold text-[#111111] dark:text-zinc-200">
+                                  {latestAttempt.score}/{latestAttempt.totalMarks ?? q.totalMarks} ({latestAttempt.percentage ?? 0}%)
+                                </span>
+                              ) : (
+                                <span className="text-xs text-[#52525B]">Awaiting faculty verification</span>
+                              )}
                             </div>
                           ) : (
                             <span className="text-xs text-zinc-400">Not attempted yet</span>
@@ -769,7 +796,16 @@ export const LMS: React.FC = () => {
                       ) : (
                         <div className="flex items-center justify-between w-full text-xs text-[#52525B]">
                           <span>{attemptCount} student submission(s)</span>
-                          <button onClick={() => deleteDoc(doc(db, 'quizzes', q.id))} className="text-rose-500 hover:underline">Delete</button>
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => setGradingQuiz(q)}
+                              className="font-semibold text-[#111111] dark:text-zinc-200 hover:underline"
+                            >
+                              Grade Attempts
+                            </button>
+                            <button onClick={() => deleteDoc(doc(db, 'quizzes', q.id))} className="text-rose-500 hover:underline">Delete</button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -1415,7 +1451,13 @@ export const LMS: React.FC = () => {
         open={!!reviewData}
         onClose={() => setReviewData(null)}
         title={`Answer Review — ${reviewData?.quiz.title || ''}`}
-        subtitle={reviewData ? `Score: ${reviewData.attempt.score} / ${reviewData.attempt.totalMarks} (${reviewData.attempt.percentage}%)` : ''}
+        subtitle={
+          reviewData
+            ? typeof reviewData.attempt.score === 'number'
+              ? `Score: ${reviewData.attempt.score} / ${reviewData.attempt.totalMarks ?? reviewData.quiz.totalMarks} (${reviewData.attempt.percentage ?? 0}%)`
+              : 'Status: Pending Faculty Verification'
+            : ''
+        }
         maxWidth="max-w-2xl"
       >
         {reviewData && (
@@ -1485,6 +1527,61 @@ export const LMS: React.FC = () => {
             })}
           </div>
         )}
+      </Modal>
+
+      {/* Faculty Quiz Attempt Grading Modal */}
+      <Modal
+        open={!!gradingQuiz}
+        onClose={() => setGradingQuiz(null)}
+        title={`Grade Quiz Attempts — ${gradingQuiz?.title || ''}`}
+        subtitle={gradingQuiz ? `Max Marks: ${gradingQuiz.totalMarks} · Objective questions auto-evaluated for verification` : ''}
+        maxWidth="max-w-2xl"
+      >
+        {gradingQuiz && (() => {
+          const attempts = quizAttempts.filter(a => a.quizId === gradingQuiz.id);
+          return (
+            <div className="space-y-3">
+              {attempts.map(att => {
+                const { score: autoScore, needsManualGrading } = computeAttemptObjectiveScore(gradingQuiz, att);
+                const draftVal = attemptScoreDraft[att.id] ?? att.score ?? autoScore;
+                return (
+                  <div key={att.id} className="p-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-200 dark:border-zinc-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">{att.studentName}</p>
+                      <p className="text-xs text-[#52525B]">
+                        Auto-evaluated: <span className="font-mono font-semibold">{autoScore}/{gradingQuiz.totalMarks}</span>
+                        {needsManualGrading ? ' · Includes short-answer review' : ''}
+                      </p>
+                      <div className="mt-1">
+                        <StatusText status={att.status === 'graded' || typeof att.score === 'number' ? 'graded' : 'pending'} />
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        max={gradingQuiz.totalMarks}
+                        value={draftVal}
+                        onChange={e => setAttemptScoreDraft(prev => ({ ...prev, [att.id]: Number(e.target.value) }))}
+                        className="w-20 px-2.5 py-1.5 text-xs font-mono bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-lg"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleGradeQuizAttempt(gradingQuiz, att)}
+                        className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-[#111111] dark:bg-white dark:text-zinc-950 text-white"
+                      >
+                        Publish Score
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              {attempts.length === 0 && (
+                <p className="text-xs text-zinc-400 text-center py-6">No student attempts submitted for this quiz yet.</p>
+              )}
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );
