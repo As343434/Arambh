@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
 import { signInWithEmailAndPassword } from 'firebase/auth';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { auth, db } from '../firebase';
 import { doc, getDoc } from 'firebase/firestore';
-import { BookOpen, Lock, Mail, AlertCircle } from 'lucide-react';
-import { motion } from 'motion/react';
+import { GraduationCap, Lock, Mail, AlertCircle, ArrowLeft } from 'lucide-react';
+import { normalizeRole } from '../config/rbac';
 
 export const Login: React.FC = () => {
   const [email, setEmail] = useState('');
@@ -22,72 +22,76 @@ export const Login: React.FC = () => {
     try {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
-      
-      // Fetch user role to determine redirect
+
       const userDoc = await getDoc(doc(db, 'users', user.uid));
       const userData = userDoc.data();
-      
-      if (userData?.role === 'student') {
+      const role = normalizeRole(userData?.role);
+
+      if (role === 'student') {
         navigate('/student-dashboard', { replace: true });
       } else {
         const from = location.state?.from?.pathname || '/dashboard';
         navigate(from, { replace: true });
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to login. Please check your credentials.');
+      setError(err.message || 'Failed to sign in. Please verify your email and password.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="max-w-md w-full bg-white rounded-3xl shadow-xl shadow-slate-200/50 p-8 border border-slate-100"
-      >
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600 text-white mb-4 shadow-lg shadow-indigo-200">
-            <BookOpen className="w-8 h-8" />
+    <div className="min-h-screen bg-[#FFFFFF] dark:bg-zinc-950 flex flex-col justify-center items-center p-4">
+      <div className="max-w-md w-full bg-white dark:bg-zinc-900 rounded-3xl border border-zinc-200 dark:border-zinc-800 p-8 shadow-[0_8px_30px_-8px_rgba(0,0,0,0.08)]">
+        <div className="mb-6">
+          <Link to="/" className="inline-flex items-center gap-1.5 text-xs font-medium text-[#52525B] dark:text-zinc-400 hover:text-[#111111] dark:hover:text-zinc-100 mb-6">
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back to University Home
+          </Link>
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-[#111111] dark:bg-white text-white dark:text-zinc-950 flex items-center justify-center shrink-0">
+              <GraduationCap className="w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold text-[#111111] dark:text-zinc-100">University Portal</h1>
+              <p className="text-xs text-[#52525B] dark:text-zinc-400">Sign in to access your role workspace</p>
+            </div>
           </div>
-          <h2 className="text-2xl font-bold text-slate-900">Welcome Back</h2>
-          <p className="text-slate-500 mt-2">Sign in to access your dashboard</p>
         </div>
 
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-start gap-3 text-red-600 text-sm">
-            <AlertCircle className="w-5 h-5 shrink-0" />
+          <div className="mb-5 p-3.5 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 rounded-2xl flex items-start gap-2.5 text-rose-700 dark:text-rose-300 text-xs">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <p>{error}</p>
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Email Address</label>
+            <label className="block text-xs font-semibold text-[#111111] dark:text-zinc-300 mb-1.5">University Email</label>
             <div className="relative">
-              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+              <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
               <input
                 type="email"
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
-                placeholder="name@school.com"
+                className="w-full pl-10 pr-4 py-2.5 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl text-[#111111] dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
+                placeholder="Enter your university email"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Password</label>
+            <label className="block text-xs font-semibold text-[#111111] dark:text-zinc-300 mb-1.5">Password</label>
             <div className="relative">
-              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+              <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
               <input
                 type="password"
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full pl-12 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                className="w-full pl-10 pr-4 py-2.5 text-sm bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-2xl text-[#111111] dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-black/20 dark:focus:ring-white/20"
                 placeholder="••••••••"
               />
             </div>
@@ -96,21 +100,18 @@ export const Login: React.FC = () => {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-2xl shadow-lg shadow-indigo-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full bg-[#111111] hover:bg-[#27272A] dark:bg-white dark:text-zinc-950 dark:hover:bg-zinc-200 text-white text-sm font-semibold py-3 rounded-2xl transition-colors disabled:opacity-50"
           >
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
         </form>
 
-        <div className="mt-8 pt-8 border-t border-slate-100 text-center">
-          <p className="text-sm text-slate-500 mb-2">
-            Default password: <code className="bg-slate-100 px-1 rounded">arambh123</code>
-          </p>
-          <p className="text-sm text-slate-500">
-            Forgot password? Contact your school administrator.
+        <div className="mt-6 pt-5 border-t border-zinc-200 dark:border-zinc-800 text-center">
+          <p className="text-xs text-[#52525B] dark:text-zinc-400">
+            Accounts are provisioned by University Administration or Admissions.
           </p>
         </div>
-      </motion.div>
+      </div>
     </div>
   );
 };

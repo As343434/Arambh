@@ -1,65 +1,699 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper functions
+
+    // =========================================================================
+    // 1. AUTHENTICATION & IDENTITY HELPERS
+    // =========================================================================
     function isSignedIn() {
       return request.auth != null;
     }
-    
+
+    function userDocExists() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
     function getUserData() {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
     }
-    
-    function hasRole(role) {
-      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == role;
+
+    function hasAnyRole(allowed) {
+      return userDocExists() && (
+        getUserData().role in allowed ||
+        (getUserData().roles is list && getUserData().roles.hasAny(allowed))
+      );
     }
 
-    // Users collection
+    function isStaffAccount() {
+      return userDocExists() && !hasAnyRole(['student', 'parent', 'unassigned']);
+    }
+
+    function isParentOf(studentUid) {
+      return hasAnyRole(['parent']) &&
+        userDocExists() &&
+        getUserData().parentOfStudentIds is list &&
+        studentUid in getUserData().parentOfStudentIds;
+    }
+
+    // =========================================================================
+    // 2. ROLE-GROUP DEFINITIONS (ALL UNIVERSITY ERP + LMS PORTAL ROLES)
+    // =========================================================================
+    function isSuperOrUniAdmin() {
+      return hasAnyRole(['super_admin', 'university_admin', 'admin']);
+    }
+
+    function isAdmin() {
+      return hasAnyRole(['super_admin', 'university_admin', 'deputy_admin', 'admin']);
+    }
+
+    function isITAdmin() {
+      return isAdmin() || hasAnyRole(['it_administrator']);
+    }
+
+    function isAcademicLeader() {
+      return isAdmin() || hasAnyRole([
+        'hod',
+        'academic_affairs_director',
+        'academic_coordinator',
+        'curriculum_officer',
+        'academic_scheduling_officer'
+      ]);
+    }
+
+    function isFaculty() {
+      return isAcademicLeader() || hasAnyRole([
+        'teacher',
+        'professor',
+        'teaching_assistant',
+        'research_assistant'
+      ]);
+    }
+
+    function isExamStaff() {
+      return isAdmin() || hasAnyRole([
+        'hod',
+        'exam_controller',
+        'deputy_controller',
+        'exam_coordinator',
+        'exam_scheduling_officer',
+        'exam_operations_officer',
+        'invigilator',
+        'marks_processing_officer',
+        'results_officer',
+        'revaluation_officer'
+      ]);
+    }
+
+    function isFinance() {
+      return isAdmin() || hasAnyRole([
+        'finance_director',
+        'accountant',
+        'fee_officer',
+        'scholarship_officer'
+      ]);
+    }
+
+    function isHR() {
+      return isAdmin() || hasAnyRole([
+        'hr_manager',
+        'recruitment_officer',
+        'payroll_officer',
+        'hod'
+      ]);
+    }
+
+    function isPayrollAuthorized() {
+      return isSuperOrUniAdmin() || hasAnyRole([
+        'finance_director',
+        'hr_manager',
+        'payroll_officer'
+      ]);
+    }
+
+    function isRegistrarOrAdmissions() {
+      return isAdmin() || hasAnyRole([
+        'university_registrar',
+        'deputy_registrar',
+        'registration_officer',
+        'records_officer',
+        'transcript_officer',
+        'admission_director',
+        'admission_manager',
+        'admission_officer',
+        'verification_officer',
+        'interview_coordinator',
+        'admission_counsellor'
+      ]);
+    }
+
+    function isLibraryStaff() {
+      return isAdmin() || hasAnyRole(['librarian', 'library_assistant']);
+    }
+
+    function isHostelStaff() {
+      return isAdmin() || hasAnyRole(['hostel_warden']);
+    }
+
+    function isTransportStaff() {
+      return isAdmin() || hasAnyRole(['transport_manager']);
+    }
+
+    function isPlacementStaff() {
+      return isAdmin() || hasAnyRole(['placement_officer']);
+    }
+
+    function isSupportStaff() {
+      return isAdmin() || hasAnyRole([
+        'it_administrator',
+        'it_support_officer',
+        'student_affairs_officer',
+        'support_staff',
+        'hostel_warden',
+        'transport_manager',
+        'hod'
+      ]);
+    }
+
+    function isDisciplineStaff() {
+      return isAdmin() || hasAnyRole([
+        'hod',
+        'university_registrar',
+        'hostel_warden',
+        'student_affairs_officer'
+      ]);
+    }
+
+    function isCertificateStaff() {
+      return isRegistrarOrAdmissions() ||
+        isExamStaff() ||
+        hasAnyRole(['student_affairs_officer', 'support_staff']);
+    }
+
+    function isApprover() {
+      return isAdmin() ||
+        isAcademicLeader() ||
+        isFinance() ||
+        isHR() ||
+        isExamStaff() ||
+        isRegistrarOrAdmissions() ||
+        hasAnyRole(['hostel_warden', 'it_administrator', 'student_affairs_officer', 'placement_officer', 'support_staff']);
+    }
+
+    // =========================================================================
+    // 3. INSTITUTIONAL CONFIG, RBAC & APPROVAL ENGINE
+    // =========================================================================
+    match /university_config/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin();
+    }
+
+    match /system_settings/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin();
+    }
+
+    match /roles/{roleId} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin();
+    }
+
+    match /rolePermissions/{roleId} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin();
+    }
+
+    match /approvalWorkflows/{wfId} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin();
+    }
+
+    match /approvalRequests/{reqId} {
+      allow read: if isSignedIn() && (
+        isApprover() ||
+        resource.data.requesterId == request.auth.uid
+      );
+      allow create: if isSignedIn() && request.resource.data.requesterId == request.auth.uid;
+      allow update: if isSignedIn() && isApprover();
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 4. USERS & PROFILES (WITH FIELD-LEVEL & ROLE PROTECTIONS)
+    // =========================================================================
     match /users/{userId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn() && (request.auth.uid == userId || hasRole('admin'));
+      allow create: if isSignedIn() && (
+        request.auth.uid == userId ||
+        isAdmin() ||
+        isHR() ||
+        isRegistrarOrAdmissions()
+      );
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        isHR() ||
+        isRegistrarOrAdmissions() ||
+        (hasAnyRole(['it_administrator']) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'role', 'roles', 'permissionOverrides', 'permissionExpiresAt',
+            'officeId', 'teamId', 'isFirstLogin', 'status'
+          ])
+        ) ||
+        (isHostelStaff() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['hostelId', 'hostelRoomId'])
+        ) ||
+        (isTransportStaff() &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['transportRouteId'])
+        ) ||
+        (request.auth.uid == userId &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'role', 'roles', 'permissionOverrides', 'permissionExpiresAt', 'status',
+            'rollNo', 'studentId', 'programId', 'departmentId', 'campusId', 'facultyId',
+            'semesterId', 'semesterNumber', 'batchId', 'classId', 'registrationHold',
+            'registrationHoldReason', 'academicStanding', 'employeeId',
+            'salaryBasic', 'salaryAllowances', 'contractId'
+          ])
+        )
+      );
+      allow delete: if isAdmin();
     }
 
-    // Classes collection
-    match /classes/{classId} {
+    // =========================================================================
+    // 5. INFRASTRUCTURE, ORGANIZATIONAL HIERARCHY, OFFICES & TEAMS
+    // =========================================================================
+    match /campuses/{id} {
       allow read: if isSignedIn();
-      allow write: if hasRole('admin');
+      allow write: if isITAdmin();
+    }
+    match /buildings/{id} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin();
+    }
+    match /rooms/{id} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin() || isAcademicLeader() || isExamStaff();
+    }
+    match /faculties/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader();
+    }
+    match /departments/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader();
+    }
+    match /offices/{id} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin() || isHR();
+    }
+    match /teams/{id} {
+      allow read: if isSignedIn();
+      allow write: if isITAdmin() || isHR() || isAcademicLeader();
+    }
+    match /teamTasks/{id} {
+      allow read: if isSignedIn();
+      allow write: if isStaffAccount();
+    }
+    match /designations/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() || isHR();
     }
 
-    // Subjects collection
-    match /subjects/{subjectId} {
+    // =========================================================================
+    // 6. ACADEMIC STRUCTURE, CLASSES, COURSE REGISTRATION & ADVISING
+    // =========================================================================
+    match /academicYears/{id} {
       allow read: if isSignedIn();
-      allow write: if hasRole('admin');
+      allow write: if isAcademicLeader();
+    }
+    match /semesters/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader();
+    }
+    match /programs/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader();
+    }
+    match /courses/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader();
+    }
+    match /subjects/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader();
+    }
+    match /batches/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader() || isRegistrarOrAdmissions();
+    }
+    match /classes/{id} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAcademicLeader() || isRegistrarOrAdmissions();
+      allow update: if isAcademicLeader() || isRegistrarOrAdmissions() || (
+        isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['students'])
+      );
+    }
+    match /academicEvents/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAcademicLeader() || isExamStaff() || isRegistrarOrAdmissions();
     }
 
-    // Attendance collection
-    match /attendance/{attendanceId} {
-      allow read: if isSignedIn();
-      allow write: if hasRole('admin') || hasRole('teacher');
+    match /courseRegistrations/{id} {
+      allow read: if isSignedIn() && (
+        isAcademicLeader() ||
+        isRegistrarOrAdmissions() ||
+        isFaculty() ||
+        resource.data.studentId == request.auth.uid ||
+        isParentOf(resource.data.studentId)
+      );
+      allow create: if isSignedIn() && (
+        isAcademicLeader() ||
+        isRegistrarOrAdmissions() ||
+        request.resource.data.studentId == request.auth.uid
+      );
+      allow update: if isSignedIn() && (
+        isAcademicLeader() ||
+        isRegistrarOrAdmissions() ||
+        resource.data.studentId == request.auth.uid
+      );
+      allow delete: if isAcademicLeader() || isRegistrarOrAdmissions() || resource.data.studentId == request.auth.uid;
     }
 
-    // Timetable collection
-    match /timetable/{timetableId} {
-      allow read: if isSignedIn();
-      allow write: if hasRole('admin');
+    match /advisingAppointments/{id} {
+      allow read: if isSignedIn() && (
+        isAcademicLeader() ||
+        isFaculty() ||
+        resource.data.studentId == request.auth.uid ||
+        resource.data.advisorId == request.auth.uid
+      );
+      allow create: if isSignedIn() && (isFaculty() || request.resource.data.studentId == request.auth.uid);
+      allow update: if isSignedIn() && (
+        isFaculty() ||
+        resource.data.studentId == request.auth.uid ||
+        resource.data.advisorId == request.auth.uid
+      );
+      allow delete: if isAdmin();
     }
 
-    // Notices collection
-    match /notices/{noticeId} {
-      allow read: if isSignedIn();
-      allow write: if hasRole('admin') || hasRole('teacher');
+    // =========================================================================
+    // 7. ADMISSIONS PIPELINE
+    // =========================================================================
+    match /admissions/{id} {
+      allow read: if isRegistrarOrAdmissions() || isAdmin() || isAcademicLeader();
+      allow write: if isRegistrarOrAdmissions() || isAdmin();
     }
 
-    // Assignments collection
-    match /assignments/{assignmentId} {
+    // =========================================================================
+    // 8. TIMETABLE & ATTENDANCE
+    // =========================================================================
+    match /timetable/{id} {
       allow read: if isSignedIn();
-      allow write: if hasRole('admin') || hasRole('teacher');
+      allow write: if isAcademicLeader();
     }
 
-    // Submissions collection
-    match /submissions/{submissionId} {
+    match /attendance/{id} {
+      allow read: if isSignedIn() && (
+        isFaculty() ||
+        isExamStaff() ||
+        resource.data.studentId == request.auth.uid ||
+        isParentOf(resource.data.studentId)
+      );
+      allow write: if isFaculty() || isExamStaff();
+    }
+
+    match /attendanceCorrections/{id} {
+      allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update: if isFaculty();
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 9. LMS, ASSIGNMENTS, QUESTION BANK & QUIZZES
+    // =========================================================================
+    match /lmsModules/{id} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      allow write: if isFaculty();
+    }
+    match /lmsMaterials/{id} {
+      allow read: if isSignedIn();
+      allow write: if isFaculty();
+    }
+    match /lmsProgress/{id} {
+      allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
+      allow write: if isSignedIn() && (isFaculty() || request.resource.data.studentId == request.auth.uid);
+    }
+    match /lmsDiscussions/{id} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn() && (isFaculty() || resource.data.authorId == request.auth.uid);
+    }
+    match /assignments/{id} {
+      allow read: if isSignedIn();
+      allow write: if isFaculty();
+    }
+    match /submissions/{id} {
+      allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && (isFaculty() || request.resource.data.studentId == request.auth.uid);
+      allow update: if isSignedIn() && (
+        isFaculty() ||
+        (resource.data.studentId == request.auth.uid &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['marks', 'grade', 'feedback', 'gradedBy'])
+        )
+      );
+      allow delete: if isFaculty();
+    }
+    match /questionBank/{id} {
+      allow read, write: if isFaculty() || isExamStaff();
+    }
+    match /quizzes/{id} {
+      allow read: if isSignedIn();
+      allow write: if isFaculty();
+    }
+    match /quizAttempts/{id} {
+      allow read: if isSignedIn() && (isFaculty() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update, delete: if isFaculty();
+    }
+
+    // =========================================================================
+    // 10. EXAMINATIONS, RESULTS & REVALUATIONS
+    // =========================================================================
+    match /exams/{id} {
+      allow read: if isSignedIn();
+      allow write: if isExamStaff();
+    }
+    match /examSchedules/{id} {
+      allow read: if isSignedIn();
+      allow write: if isExamStaff();
+    }
+    match /examRegistrations/{id} {
+      allow read: if isSignedIn() && (isExamStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && (isExamStaff() || request.resource.data.studentId == request.auth.uid);
+      allow update, delete: if isExamStaff();
+    }
+    match /examMarks/{id} {
+      allow read: if isSignedIn() && (
+        isExamStaff() ||
+        isFaculty() ||
+        isRegistrarOrAdmissions() ||
+        (resource.data.isPublished == true && (
+          resource.data.studentId == request.auth.uid ||
+          isParentOf(resource.data.studentId)
+        ))
+      );
+      allow write: if isExamStaff() || isFaculty();
+    }
+    match /revaluationRequests/{id} {
+      allow read: if isSignedIn() && (isExamStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update: if isExamStaff();
+      allow delete: if isAdmin();
+    }
+
+    // =========================================================================
+    // 11. FINANCE, FEES, PAYMENTS & SCHOLARSHIPS
+    // =========================================================================
+    match /feeStructures/{id} {
+      allow read: if isSignedIn();
+      allow write: if isFinance();
+    }
+    match /scholarships/{id} {
+      allow read: if isSignedIn();
+      allow write: if isFinance();
+    }
+    match /scholarshipApplications/{id} {
+      allow read: if isFinance() || resource.data.studentId == request.auth.uid;
+      allow create: if isSignedIn() && (isFinance() || request.resource.data.studentId == request.auth.uid);
+      allow update, delete: if isFinance();
+    }
+    match /invoices/{id} {
+      allow read: if isFinance() ||
+        resource.data.studentId == request.auth.uid ||
+        isParentOf(resource.data.studentId);
+      allow create: if isFinance() || isRegistrarOrAdmissions() || isHostelStaff();
+      allow delete: if isFinance();
+      allow update: if isFinance() || (
+        isSignedIn() &&
+        resource.data.studentId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paidAmount', 'status']) &&
+        request.resource.data.paidAmount >= resource.data.paidAmount &&
+        request.resource.data.paidAmount <= resource.data.totalAmount
+      );
+    }
+    match /payments/{id} {
+      allow read: if isFinance() ||
+        resource.data.studentId == request.auth.uid ||
+        isParentOf(resource.data.studentId);
+      allow create: if isFinance() || (isSignedIn() && request.resource.data.studentId == request.auth.uid);
+      allow update, delete: if isFinance();
+    }
+
+    // =========================================================================
+    // 12. FACULTY, HR, RECRUITMENT, LEAVE & PAYROLL
+    // =========================================================================
+    match /employmentContracts/{id} {
+      allow read: if isHR() || resource.data.employeeId == request.auth.uid;
+      allow write: if isHR();
+    }
+    match /staffPerformanceReviews/{id} {
+      allow read: if isHR() || resource.data.employeeId == request.auth.uid;
+      allow write: if isHR();
+    }
+    match /recruitmentOpenings/{id} {
+      allow read: if isSignedIn();
+      allow write: if isHR();
+    }
+    match /recruitmentApplicants/{id} {
+      allow read, write: if isHR();
+    }
+    match /staffAttendance/{id} {
+      allow read: if isHR() || resource.data.employeeId == request.auth.uid;
+      allow write: if isHR();
+    }
+    match /leaveRequests/{id} {
+      allow read: if isHR() || resource.data.staffId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.staffId == request.auth.uid;
+      allow update: if isHR();
+      allow delete: if isHR() || resource.data.staffId == request.auth.uid;
+    }
+    match /payrollRecords/{id} {
+      allow read: if isPayrollAuthorized() || resource.data.staffId == request.auth.uid;
+      allow write: if isPayrollAuthorized();
+    }
+
+    // =========================================================================
+    // 13. CAMPUS SERVICES: LIBRARY, HOSTEL, TRANSPORT, EVENTS, CLUBS, PLACEMENT
+    // =========================================================================
+    match /libraryBooks/{id} {
+      allow read: if isSignedIn();
+      allow write: if isLibraryStaff();
+    }
+    match /libraryIssues/{id} {
+      allow read: if isSignedIn() && (isLibraryStaff() || resource.data.userId == request.auth.uid);
+      allow create, delete: if isLibraryStaff();
+      allow update: if isLibraryStaff() || (
+        isSignedIn() &&
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['dueDate', 'renewCount'])
+      );
+    }
+    match /libraryReservations/{id} {
+      allow read: if isSignedIn() && (isLibraryStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update, delete: if isLibraryStaff() || resource.data.studentId == request.auth.uid;
+    }
+
+    match /hostels/{id} {
+      allow read: if isSignedIn();
+      allow write: if isHostelStaff();
+    }
+    match /hostelRooms/{id} {
+      allow read: if isSignedIn();
+      allow write: if isHostelStaff();
+    }
+    match /hostelAllocations/{id} {
+      allow read: if isSignedIn() && (
+        isHostelStaff() ||
+        resource.data.studentId == request.auth.uid ||
+        isParentOf(resource.data.studentId)
+      );
+      allow write: if isHostelStaff();
+    }
+    match /hostelRequests/{id} {
+      allow read: if isSignedIn() && (isHostelStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update, delete: if isHostelStaff() || resource.data.studentId == request.auth.uid;
+    }
+
+    match /transportRoutes/{id} {
+      allow read: if isSignedIn();
+      allow write: if isTransportStaff();
+    }
+    match /transportAllocations/{id} {
+      allow read: if isSignedIn() && (
+        isTransportStaff() ||
+        resource.data.studentId == request.auth.uid ||
+        isParentOf(resource.data.studentId)
+      );
+      allow write: if isTransportStaff();
+    }
+    match /transportRequests/{id} {
+      allow read: if isSignedIn() && (isTransportStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.studentId == request.auth.uid;
+      allow update, delete: if isTransportStaff() || resource.data.studentId == request.auth.uid;
+    }
+
+    match /universityEvents/{id} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin() || hasAnyRole(['student_affairs_officer', 'placement_officer', 'support_staff', 'hod']);
+      allow update: if isAdmin() ||
+        hasAnyRole(['student_affairs_officer', 'placement_officer', 'support_staff', 'hod']) ||
+        (isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['registeredUserIds']));
+    }
+    match /studentClubs/{id} {
+      allow read: if isSignedIn();
+      allow create, delete: if isAdmin() || hasAnyRole(['student_affairs_officer', 'support_staff', 'hod']);
+      allow update: if isAdmin() ||
+        hasAnyRole(['student_affairs_officer', 'support_staff', 'hod']) ||
+        (isSignedIn() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds']));
+    }
+
+    match /placementDrives/{id} {
+      allow read: if isSignedIn();
+      allow write: if isPlacementStaff();
+    }
+    match /placementApplications/{id} {
+      allow read: if isSignedIn() && (isPlacementStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && (isPlacementStaff() || request.resource.data.studentId == request.auth.uid);
+      allow update, delete: if isPlacementStaff();
+    }
+
+    // =========================================================================
+    // 14. GOVERNANCE: CERTIFICATES, SUPPORT, DISCIPLINE, NOTICES, AUDIT LOGS
+    // =========================================================================
+    match /certificateRequests/{id} {
+      allow read: if isSignedIn() && (isCertificateStaff() || resource.data.studentId == request.auth.uid);
+      allow create: if isSignedIn() && (isCertificateStaff() || request.resource.data.studentId == request.auth.uid);
+      allow update, delete: if isCertificateStaff();
+    }
+    match /supportTickets/{id} {
+      allow read: if isSignedIn() && (isSupportStaff() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (isSupportStaff() || resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+    match /disciplineRecords/{id} {
+      allow read: if isDisciplineStaff() || resource.data.studentId == request.auth.uid;
+      allow write: if isDisciplineStaff();
+    }
+    match /notices/{id} {
+      allow read: if isSignedIn();
+      allow write: if isStaffAccount();
+    }
+    match /messages/{id} {
+      allow read: if isSignedIn() && (
+        resource.data.senderId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        resource.data.senderId == request.auth.uid ||
+        resource.data.recipientId == request.auth.uid
+      );
+      allow delete: if isAdmin();
+    }
+    match /auditLogs/{id} {
+      allow read: if isAdmin() || hasAnyRole(['it_administrator', 'university_registrar', 'finance_director']);
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 15. DEFAULT DENY CATCH-ALL
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

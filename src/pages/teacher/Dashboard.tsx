@@ -1,332 +1,245 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, getDoc, writeBatch } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import {
+  Award,
+  Bell,
+  BookOpen,
+  Calendar,
+  ClipboardCheck,
+  Clock,
+  FileText,
+  GraduationCap,
+  Users
+} from 'lucide-react';
 import { db } from '../../firebase';
 import { useAuth } from '../../contexts/AuthContext';
-import { Class } from '../../types';
-import { BookOpen, Users, ClipboardCheck, FileText, Bell, Plus, Calendar, CheckCircle2, AlertCircle } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { useUniversity } from '../../contexts/UniversityContext';
+import { PageHeader, StatCard, StatusText } from '../../components/ui/DataUI';
+import { AttendanceCorrection, LeaveRequest, Submission, TimetableEntry } from '../../types';
 
 export const TeacherDashboard: React.FC = () => {
   const { profile } = useAuth();
-  const [classes, setClasses] = useState<Class[]>([]);
-  const [students, setStudents] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'classes' | 'attendance' | 'assignments'>('classes');
-  
-  // Attendance State
-  const [selectedClass, setSelectedClass] = useState<any>(null);
-  const [attendanceRecords, setAttendanceRecords] = useState<{[key: string]: 'present' | 'absent'}>({});
-  const [attLoading, setAttLoading] = useState(false);
-  const [attMessage, setAttMessage] = useState({ type: '', text: '' });
+  const { university, classes, subjects } = useUniversity();
 
-  // Assignment State
-  const [showAssignModal, setShowAssignModal] = useState(false);
-  const [assignTitle, setAssignTitle] = useState('');
-  const [assignDesc, setAssignDesc] = useState('');
-  const [assignDueDate, setAssignDueDate] = useState('');
+  const [timetable, setTimetable] = useState<TimetableEntry[]>([]);
+  const [submissions, setSubmissions] = useState<Submission[]>([]);
+  const [corrections, setCorrections] = useState<AttendanceCorrection[]>([]);
+  const [leaves, setLeaves] = useState<LeaveRequest[]>([]);
 
   useEffect(() => {
     if (!profile?.uid) return;
+    const unsubs = [
+      onSnapshot(
+        query(collection(db, 'timetable'), where('teacherId', '==', profile.uid)),
+        snap => setTimetable(snap.docs.map(d => ({ id: d.id, ...d.data() } as TimetableEntry))),
+        () => {}
+      ),
+      onSnapshot(
+        collection(db, 'submissions'),
+        snap => setSubmissions(snap.docs.map(d => ({ id: d.id, ...d.data() } as Submission))),
+        () => {}
+      ),
+      onSnapshot(
+        collection(db, 'attendanceCorrections'),
+        snap => setCorrections(snap.docs.map(d => ({ id: d.id, ...d.data() } as AttendanceCorrection))),
+        () => {}
+      ),
+      onSnapshot(
+        query(collection(db, 'leaveRequests'), where('staffId', '==', profile.uid)),
+        snap => setLeaves(snap.docs.map(d => ({ id: d.id, ...d.data() } as LeaveRequest))),
+        () => {}
+      )
+    ];
+    return () => unsubs.forEach(u => u());
+  }, [profile?.uid]);
 
-    const classesQuery = query(collection(db, 'classes'), where('teacherId', '==', profile.uid));
-    
-    const unsubscribe = onSnapshot(classesQuery, 
-      async (snapshot) => {
-        const classesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Class));
-        setClasses(classesData);
-
-        // Fetch all students in teacher's classes
-        const allStudentIds = Array.from(new Set(classesData.flatMap(c => c.students || [])));
-        if (allStudentIds.length > 0) {
-          try {
-            const studentDocs = await Promise.all(allStudentIds.map(id => getDoc(doc(db, 'users', id))));
-            setStudents(studentDocs.filter(d => d.exists()).map(d => ({ uid: d.id, ...d.data() })));
-          } catch (err) {
-            console.error('Error fetching students:', err);
-          }
-        }
-        setLoading(false);
-      },
-      (error) => {
-        console.error('Error listening to classes:', error);
-        setLoading(false);
-      }
+  const myClasses = useMemo(() => {
+    return classes.filter(c =>
+      c.mentorId === profile?.uid ||
+      c.teacherId === profile?.uid ||
+      timetable.some(t => t.classId === c.id)
     );
+  }, [classes, profile?.uid, timetable]);
 
-    return () => unsubscribe();
-  }, [profile]);
+  const mentoredCount = useMemo(
+    () => classes.filter(c => c.mentorId === profile?.uid).length,
+    [classes, profile?.uid]
+  );
 
-  const handleMarkAttendance = async () => {
-    if (!selectedClass || !profile) return;
-    setAttLoading(true);
-    try {
-      const today = new Date().toISOString().split('T')[0];
-      const batch = writeBatch(db);
-      
-      Object.entries(attendanceRecords).forEach(([studentId, status]) => {
-        const attendanceRef = doc(collection(db, 'attendance'));
-        batch.set(attendanceRef, {
-          classId: selectedClass.id,
-          className: selectedClass.name,
-          date: today,
-          teacherId: profile.uid,
-          studentId,
-          status,
-          createdAt: serverTimestamp()
-        });
-      });
+  const totalStudentsCount = useMemo(() => {
+    const ids = new Set<string>();
+    myClasses.forEach(c => (c.students || []).forEach(sid => ids.add(sid)));
+    return ids.size;
+  }, [myClasses]);
 
-      await batch.commit();
-      setAttMessage({ type: 'success', text: 'Attendance marked successfully!' });
-      setTimeout(() => setAttMessage({ type: '', text: '' }), 3000);
-    } catch (error) {
-      console.error('Error marking attendance:', error);
-      setAttMessage({ type: 'error', text: 'Failed to mark attendance.' });
-    } finally {
-      setAttLoading(false);
-    }
-  };
+  const todaySchedule = useMemo(() => {
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const todayDay = days[new Date().getDay()];
+    return timetable
+      .filter(s => s.day === todayDay)
+      .map(s => {
+        const sub = subjects.find(sb => sb.id === s.subjectId);
+        const cls = classes.find(c => c.id === s.classId);
+        return {
+          ...s,
+          subjectName: s.subjectName || sub?.name || 'Lecture',
+          className: s.className || cls?.name || ''
+        };
+      })
+      .sort((a, b) => (a.startTime || '').localeCompare(b.startTime || ''));
+  }, [timetable, subjects, classes]);
 
-  const handleCreateAssignment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedClass) return;
-    try {
-      await addDoc(collection(db, 'assignments'), {
-        classId: selectedClass.id,
-        className: selectedClass.name,
-        teacherId: profile?.uid,
-        title: assignTitle,
-        description: assignDesc,
-        dueDate: assignDueDate,
-        createdAt: serverTimestamp()
-      });
-      setShowAssignModal(false);
-      setAssignTitle('');
-      setAssignDesc('');
-      setAssignDueDate('');
-      alert('Assignment created successfully!');
-    } catch (error) {
-      alert('Failed to create assignment.');
-    }
-  };
+  const ungradedSubmissions = useMemo(
+    () => submissions.filter(s => s.status !== 'graded').length,
+    [submissions]
+  );
 
-  if (loading) return <div className="animate-pulse space-y-8">
-    <div className="h-40 bg-slate-200 rounded-3xl" />
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {[1, 2].map(i => <div key={i} className="h-64 bg-slate-200 rounded-3xl" />)}
-    </div>
-  </div>;
+  const pendingCorrections = useMemo(
+    () => corrections.filter(c => c.status === 'pending').length,
+    [corrections]
+  );
 
   return (
-    <div className="space-y-8">
-      <div className="bg-indigo-600 p-8 rounded-3xl text-white shadow-lg shadow-indigo-200 flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div>
-          <h2 className="text-3xl font-bold">Hello, {profile?.name}!</h2>
-          <p className="text-indigo-100 mt-2">Arambh Teacher Portal • {classes.length} Active Classes</p>
-        </div>
-        <div className="flex bg-white/10 p-1 rounded-2xl backdrop-blur-sm border border-white/20">
-          <button onClick={() => setActiveTab('classes')} className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'classes' ? 'bg-white text-indigo-600' : 'text-white hover:bg-white/10'}`}>Classes</button>
-          <button onClick={() => setActiveTab('attendance')} className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'attendance' ? 'bg-white text-indigo-600' : 'text-white hover:bg-white/10'}`}>Attendance</button>
-          <button onClick={() => setActiveTab('assignments')} className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${activeTab === 'assignments' ? 'bg-white text-indigo-600' : 'text-white hover:bg-white/10'}`}>Assignments</button>
-        </div>
+    <div className="space-y-6">
+      <PageHeader
+        title={`Faculty Workspace — ${profile?.name || 'Professor'}`}
+        subtitle={`${university.shortName || university.name} · ${myClasses.length} active sections · ${timetable.length} weekly timetable slots`}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Link to="/attendance" className="px-4 py-2.5 text-xs font-semibold bg-[#111111] hover:bg-[#27272A] dark:bg-white dark:text-zinc-950 text-white rounded-2xl transition-colors">
+              Mark Attendance
+            </Link>
+            <Link to="/lms" className="px-4 py-2.5 text-xs font-semibold bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-2xl hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors">
+              Manage LMS
+            </Link>
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard label="Assigned Sections" value={myClasses.length} hint={`${mentoredCount} mentored cohorts`} icon={BookOpen} tone="navy" />
+        <StatCard label="Total Students" value={totalStudentsCount} hint="Across assigned classes" icon={Users} tone="dark" />
+        <StatCard label="Pending Grading" value={ungradedSubmissions} hint={`${pendingCorrections} attendance corrections`} icon={FileText} />
+        <StatCard label="Weekly Teaching Load" value={`${timetable.length} hrs`} hint={`${todaySchedule.length} lectures today`} icon={Clock} />
       </div>
 
-      {activeTab === 'classes' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <BookOpen className="w-5 h-5 text-indigo-600" />
-                My Assigned Classes
-              </h3>
-              <Link to="/classes" className="text-sm font-bold text-indigo-600 hover:text-indigo-700">View All</Link>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="lg:col-span-7 space-y-6">
+          <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-6 shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)]">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold flex items-center gap-2 text-[#111111] dark:text-zinc-100">
+                <BookOpen className="w-4 h-4 text-[#111111] dark:text-zinc-300" />
+                My Classes &amp; Mentorships
+              </h2>
+              <Link to="/classes" className="text-xs font-semibold text-[#111111] dark:text-zinc-200 hover:underline">View all classes</Link>
             </div>
-            <div className="space-y-4">
-              {classes.length > 0 ? classes.map((cls) => (
-                <div key={cls.id} className="p-6 bg-slate-50 rounded-2xl border border-slate-100 flex items-center justify-between">
+            <div className="space-y-3">
+              {myClasses.length > 0 ? myClasses.map(cls => (
+                <div key={cls.id} className="p-4 rounded-2xl bg-zinc-50 dark:bg-zinc-800/70 border border-zinc-200 dark:border-zinc-700 flex items-center justify-between gap-3">
                   <div>
-                    <h4 className="font-bold text-slate-900">{cls.name}</h4>
-                    <p className="text-sm text-slate-500">{cls.subject}</p>
-                    <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
-                      <Users className="w-3 h-3" />
-                      {cls.students?.length || 0} Students
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold text-[#111111] dark:text-zinc-100">{cls.name}</h3>
+                      {cls.mentorId === profile?.uid && (
+                        <span className="text-[11px] font-semibold text-[#52525B] dark:text-zinc-300">· Class Mentor</span>
+                      )}
                     </div>
+                    <p className="text-xs text-[#52525B] dark:text-zinc-400 mt-0.5">
+                      {Array.from(new Set(timetable.filter(t => t.classId === cls.id).map(t => t.subjectName || subjects.find(sb => sb.id === t.subjectId)?.name).filter(Boolean))).join(', ') || cls.subject || 'Assigned Cohort'}
+                    </p>
                   </div>
-                  <div className="flex gap-2">
-                    <button 
-                      onClick={() => { setSelectedClass(cls); setActiveTab('attendance'); }}
-                      className="p-2 bg-white text-indigo-600 rounded-xl border border-slate-200 hover:bg-indigo-50 transition-colors"
-                    >
-                      <ClipboardCheck className="w-5 h-5" />
-                    </button>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-mono text-zinc-500">{cls.students?.length || 0} students</span>
+                    <Link to="/attendance" className="px-3.5 py-2 text-xs font-semibold rounded-2xl bg-[#111111] hover:bg-[#27272A] dark:bg-white dark:text-zinc-950 text-white transition-colors">
+                      Attendance
+                    </Link>
                   </div>
                 </div>
               )) : (
-                <p className="text-slate-500 text-center py-8">No classes assigned yet.</p>
+                <div className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-2xl py-8 text-center">
+                  <p className="text-xs text-[#52525B] dark:text-zinc-400">No classes assigned yet. Contact Academic Affairs or HOD.</p>
+                </div>
               )}
             </div>
           </div>
 
-          <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold text-slate-900 mb-6">Quick Actions</h3>
-            <div className="grid grid-cols-1 gap-4">
-              <Link to="/notices" className="flex items-center gap-4 p-4 bg-slate-50 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 rounded-2xl transition-all group">
-                <div className="p-3 bg-white rounded-xl shadow-sm group-hover:bg-indigo-600 group-hover:text-white transition-all">
-                  <Bell className="w-5 h-5" />
-                </div>
-                <div className="text-left">
-                  <p className="font-bold">Post Class Notice</p>
-                  <p className="text-xs text-slate-500">Share updates with your students</p>
-                </div>
+          <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-6 shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)]">
+            <h2 className="text-sm font-semibold text-[#111111] dark:text-zinc-100 mb-3">Faculty Workflows</h2>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
+              <Link to="/attendance" className="p-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 hover:bg-[#111111] hover:text-white dark:hover:bg-white dark:hover:text-zinc-950 flex items-center gap-2 font-medium transition-colors">
+                <ClipboardCheck className="w-4 h-4 shrink-0" /> Attendance
               </Link>
-              <Link to="/assignments" className="flex items-center gap-4 p-4 bg-slate-50 hover:bg-emerald-50 text-slate-700 hover:text-emerald-700 rounded-2xl transition-all group">
-                <div className="p-3 bg-white rounded-xl shadow-sm group-hover:bg-emerald-600 group-hover:text-white transition-all">
-                  <FileText className="w-5 h-5" />
-                </div>
-                <div className="text-left">
-                  <p className="font-bold">Create Assignment</p>
-                  <p className="text-xs text-slate-500">Set new tasks and deadlines</p>
-                </div>
+              <Link to="/lms" className="p-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 hover:bg-[#111111] hover:text-white dark:hover:bg-white dark:hover:text-zinc-950 flex items-center gap-2 font-medium transition-colors">
+                <GraduationCap className="w-4 h-4 shrink-0" /> LMS &amp; Quizzes
+              </Link>
+              <Link to="/assignments" className="p-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 hover:bg-[#111111] hover:text-white dark:hover:bg-white dark:hover:text-zinc-950 flex items-center gap-2 font-medium transition-colors">
+                <FileText className="w-4 h-4 shrink-0" /> Assignments
+              </Link>
+              <Link to="/examinations" className="p-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 hover:bg-[#111111] hover:text-white dark:hover:bg-white dark:hover:text-zinc-950 flex items-center gap-2 font-medium transition-colors">
+                <Award className="w-4 h-4 shrink-0" /> Marks Entry
+              </Link>
+              <Link to="/notices" className="p-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 hover:bg-[#111111] hover:text-white dark:hover:bg-white dark:hover:text-zinc-950 flex items-center gap-2 font-medium transition-colors">
+                <Bell className="w-4 h-4 shrink-0" /> Notices &amp; Messages
+              </Link>
+              <Link to="/hr" className="p-3.5 rounded-2xl border border-zinc-200 dark:border-zinc-700 hover:bg-[#111111] hover:text-white dark:hover:bg-white dark:hover:text-zinc-950 flex items-center gap-2 font-medium transition-colors">
+                <Calendar className="w-4 h-4 shrink-0" /> Apply Leave ({leaves.length})
               </Link>
             </div>
           </div>
         </div>
-      )}
 
-      {activeTab === 'attendance' && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm">
-          <div className="flex items-center justify-between mb-8">
-            <h3 className="text-xl font-bold text-slate-900">Mark Daily Attendance</h3>
-            <select 
-              className="px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none"
-              value={selectedClass?.id || ''}
-              onChange={(e) => setSelectedClass(classes.find(c => c.id === e.target.value))}
-            >
-              <option value="">Select Class</option>
-              {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </div>
-
-          {selectedClass ? (
-            <div className="space-y-6">
-              {attMessage.text && (
-                <div className={`p-4 rounded-2xl flex items-center gap-3 text-sm ${attMessage.type === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
-                  {attMessage.type === 'success' ? <CheckCircle2 className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
-                  {attMessage.text}
+        <div className="lg:col-span-5 space-y-6">
+          <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-6 shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)]">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold flex items-center gap-2 text-[#111111] dark:text-zinc-100">
+                <Calendar className="w-4 h-4 text-[#111111] dark:text-zinc-300" />
+                Today&apos;s Teaching Schedule
+              </h2>
+              <Link to="/timetable" className="text-xs font-semibold text-[#111111] dark:text-zinc-200 hover:underline">Full week</Link>
+            </div>
+            <div className="space-y-2.5">
+              {todaySchedule.length > 0 ? todaySchedule.map(slot => (
+                <div key={slot.id} className="p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-800/70 border border-zinc-200 dark:border-zinc-700 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-mono font-semibold text-[#111111] dark:text-zinc-200">{slot.startTime} - {slot.endTime}</p>
+                    <p className="text-xs font-semibold truncate">{slot.subjectName}</p>
+                    <p className="text-[11px] text-[#52525B] dark:text-zinc-400">{slot.className}</p>
+                  </div>
+                  {slot.room && <span className="text-[11px] font-mono text-zinc-500 shrink-0">{slot.room}</span>}
+                </div>
+              )) : (
+                <div className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-2xl py-6 text-center">
+                  <p className="text-xs text-[#52525B] dark:text-zinc-400">No lectures scheduled for today.</p>
                 </div>
               )}
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="text-left border-b border-slate-100">
-                      <th className="pb-4 font-bold text-slate-500 text-sm">Roll No</th>
-                      <th className="pb-4 font-bold text-slate-500 text-sm">Student Name</th>
-                      <th className="pb-4 font-bold text-slate-500 text-sm text-center">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {students.filter(s => selectedClass.students?.includes(s.uid)).map(student => (
-                      <tr key={student.uid}>
-                        <td className="py-4 text-sm text-slate-600">{student.rollNo}</td>
-                        <td className="py-4 font-medium text-slate-900">{student.name}</td>
-                        <td className="py-4">
-                          <div className="flex items-center justify-center gap-2">
-                            <button 
-                              onClick={() => setAttendanceRecords(prev => ({ ...prev, [student.uid]: 'present' }))}
-                              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${attendanceRecords[student.uid] === 'present' ? 'bg-emerald-500 text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                            >
-                              Present
-                            </button>
-                            <button 
-                              onClick={() => setAttendanceRecords(prev => ({ ...prev, [student.uid]: 'absent' }))}
-                              className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${attendanceRecords[student.uid] === 'absent' ? 'bg-red-500 text-white shadow-md' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
-                            >
-                              Absent
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="flex justify-end pt-6 border-t border-slate-100">
-                <button 
-                  onClick={handleMarkAttendance}
-                  disabled={attLoading || Object.keys(attendanceRecords).length === 0}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-8 py-3 rounded-2xl shadow-lg disabled:opacity-50"
-                >
-                  {attLoading ? 'Saving...' : 'Submit Attendance'}
-                </button>
-              </div>
             </div>
-          ) : (
-            <div className="text-center py-20 bg-slate-50 rounded-3xl border border-dashed border-slate-200">
-              <ClipboardCheck className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-              <p className="text-slate-500 font-medium">Please select a class to mark attendance.</p>
-            </div>
-          )}
-        </motion.div>
-      )}
-
-      {/* Assignment Modal */}
-      <AnimatePresence>
-        {showAssignModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-[32px] shadow-2xl p-8 w-full max-w-lg"
-            >
-              <h3 className="text-2xl font-bold text-slate-900 mb-6">Create New Assignment</h3>
-              <form onSubmit={handleCreateAssignment} className="space-y-6">
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Select Class</label>
-                  <select 
-                    required
-                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    value={selectedClass?.id || ''}
-                    onChange={(e) => setSelectedClass(classes.find(c => c.id === e.target.value))}
-                  >
-                    <option value="">Choose a class</option>
-                    {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Title</label>
-                  <input 
-                    type="text" required value={assignTitle} onChange={(e) => setAssignTitle(e.target.value)}
-                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="e.g. Algebra Homework"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Description</label>
-                  <textarea 
-                    required rows={3} value={assignDesc} onChange={(e) => setAssignDesc(e.target.value)}
-                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder="Instructions for students..."
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold text-slate-700 mb-2">Due Date</label>
-                  <input 
-                    type="date" required value={assignDueDate} onChange={(e) => setAssignDueDate(e.target.value)}
-                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                </div>
-                <div className="flex gap-4 pt-4">
-                  <button type="button" onClick={() => setShowAssignModal(false)} className="flex-1 py-4 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition-all">Cancel</button>
-                  <button type="submit" className="flex-1 py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition-all">Create</button>
-                </div>
-              </form>
-            </motion.div>
           </div>
-        )}
-      </AnimatePresence>
+
+          <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-3xl p-6 shadow-[0_2px_14px_-4px_rgba(0,0,0,0.06)]">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-[#111111] dark:text-zinc-100">Recent Leave Applications</h2>
+              <Link to="/hr" className="text-xs font-semibold text-[#111111] dark:text-zinc-200 hover:underline">Request leave</Link>
+            </div>
+            {leaves.length > 0 ? (
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {leaves.slice(0, 4).map(lv => (
+                  <div key={lv.id} className="py-2.5 flex items-center justify-between text-xs">
+                    <div>
+                      <p className="font-medium capitalize">{lv.leaveType} Leave</p>
+                      <p className="text-[11px] font-mono text-zinc-500">{lv.startDate} → {lv.endDate}</p>
+                    </div>
+                    <StatusText status={lv.status} />
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-2xl py-6 text-center">
+                <p className="text-xs text-[#52525B] dark:text-zinc-400">No leave requests submitted.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
-

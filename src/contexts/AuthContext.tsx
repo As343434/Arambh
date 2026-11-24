@@ -1,16 +1,33 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { collection, doc, onSnapshot } from 'firebase/firestore';
 import { auth, db } from '../firebase';
-import { UserProfile } from '../types';
+import { ModuleKey, PermissionAction, RoleDefinition, UserProfile } from '../types';
+import {
+  canPerformAction,
+  canViewRestrictedField,
+  hasPermission,
+  isAnyAdminRole,
+  normalizeRole,
+  Permission
+} from '../config/rbac';
 
 interface AuthContextType {
   user: User | null;
   profile: UserProfile | null;
+  normalizedRole: string;
   loading: boolean;
+  isSuperAdmin: boolean;
   isAdmin: boolean;
+  isHOD: boolean;
   isTeacher: boolean;
   isStudent: boolean;
+  isParent: boolean;
+  customPermissions: Record<string, string[]>;
+  roleDefinitions: RoleDefinition[];
+  can: (permission: Permission) => boolean;
+  canAction: (module: ModuleKey, action: PermissionAction) => boolean;
+  canViewField: (field: 'salary' | 'financials' | 'student_pii' | 'disciplinary' | 'medical') => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -18,28 +35,31 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [customPermissions, setCustomPermissions] = useState<Record<string, string[]>>({});
+  const [roleDefinitions, setRoleDefinitions] = useState<RoleDefinition[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let unsubscribeProfile: (() => void) | null = null;
+    let unsubscribePerms: (() => void) | null = null;
+    let unsubscribeRoleDefs: (() => void) | null = null;
 
     const unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
       setUser(firebaseUser);
-      
-      // Clean up previous profile listener if it exists
-      if (unsubscribeProfile) {
-        unsubscribeProfile();
-        unsubscribeProfile = null;
-      }
+
+      if (unsubscribeProfile) { unsubscribeProfile(); unsubscribeProfile = null; }
+      if (unsubscribePerms) { unsubscribePerms(); unsubscribePerms = null; }
+      if (unsubscribeRoleDefs) { unsubscribeRoleDefs(); unsubscribeRoleDefs = null; }
 
       if (firebaseUser) {
         const docRef = doc(db, 'users', firebaseUser.uid);
-        
-        // Use onSnapshot for real-time updates and better offline support
-        unsubscribeProfile = onSnapshot(docRef, 
+        unsubscribeProfile = onSnapshot(
+          docRef,
           (docSnap) => {
             if (docSnap.exists()) {
               setProfile({ uid: docSnap.id, ...docSnap.data() } as UserProfile);
+            } else {
+              setProfile(null);
             }
             setLoading(false);
           },
@@ -48,8 +68,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setLoading(false);
           }
         );
+
+        unsubscribePerms = onSnapshot(
+          collection(db, 'rolePermissions'),
+          (snap) => {
+            const map: Record<string, string[]> = {};
+            snap.docs.forEach(d => {
+              const data = d.data();
+              if (Array.isArray(data.permissions)) map[d.id] = data.permissions;
+            });
+            setCustomPermissions(map);
+          },
+          () => {}
+        );
+
+        unsubscribeRoleDefs = onSnapshot(
+          collection(db, 'roles'),
+          (snap) => {
+            setRoleDefinitions(snap.docs.map(d => ({ id: d.id, ...d.data() } as RoleDefinition)));
+          },
+          () => {}
+        );
       } else {
         setProfile(null);
+        setCustomPermissions({});
+        setRoleDefinitions([]);
         setLoading(false);
       }
     });
@@ -57,16 +100,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       unsubscribeAuth();
       if (unsubscribeProfile) unsubscribeProfile();
+      if (unsubscribePerms) unsubscribePerms();
+      if (unsubscribeRoleDefs) unsubscribeRoleDefs();
     };
   }, []);
 
-  const value = {
+  const normalizedRole = normalizeRole(profile?.role);
+  const facultyRoles = ['teacher', 'professor', 'teaching_assistant'];
+
+  const value: AuthContextType = {
     user,
     profile,
+    normalizedRole,
     loading,
-    isAdmin: profile?.role === 'admin',
-    isTeacher: profile?.role === 'teacher',
-    isStudent: profile?.role === 'student',
+    isSuperAdmin: normalizedRole === 'super_admin',
+    isAdmin: isAnyAdminRole(profile?.role),
+    isHOD: normalizedRole === 'hod',
+    isTeacher: facultyRoles.includes(normalizedRole),
+    isStudent: normalizedRole === 'student',
+    isParent: normalizedRole === 'parent',
+    customPermissions,
+    roleDefinitions,
+    can: (permission: Permission) => hasPermission(profile || profile?.role, permission, customPermissions, roleDefinitions),
+    canAction: (module: ModuleKey, action: PermissionAction) => canPerformAction(profile, module, action, roleDefinitions),
+    canViewField: (field) => canViewRestrictedField(profile, field, roleDefinitions),
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
